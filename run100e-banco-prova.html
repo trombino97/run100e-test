@@ -1,0 +1,1867 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Banco prova Run100E</title>
+<!--
+  BANCO PROVA RUN100E – tool di test automatico FTMS per Domyos Run100E
+  Un solo file, nessuna dipendenza esterna. Da aprire in Chrome per Android
+  da un indirizzo https (GitHub Pages). Fonti: Handoff tecnico 25/10/2026,
+  Addendum tecnico 27/10/2026 (prevale), registro della mini pagina 27/10.
+  Le scelte non documentate sono nel file ASSUNZIONI.md e citate qui come Axx.
+
+  Struttura:
+    script "core":  nucleo senza DOM: costanti di sicurezza, codifica FTMS,
+                        registro, correlazione eventi, controllore di sicurezza,
+                        test T0–T9, report. Lo stesso codice gira nel simulatore.
+    script "ui":    interfaccia per il telefono e trasporto Web Bluetooth.
+
+  REGOLA DI ARCHITETTURA: solo il SafetyController scrive sul tapis roulant, e
+  solo sul Control Point 0x2AD9. Nessun'altra parte del codice ha accesso alle
+  scritture.
+-->
+<style>
+/* Strumento da banco: superfici neutre fredde, un blu strumento per le azioni,
+   il rosso è riservato allo Stop e agli allarmi. Tipografia di sistema (nessuna
+   dipendenza esterna); cifre tabellari per velocità e tempi. */
+:root {
+  --bg: #eef1f4; --panel: #ffffff; --sunk: #e4e9ee; --fg: #111820; --muted: #566371; --line: #d2d9e0;
+  --accent: #1c5ea8; --accent-fg: #ffffff;
+  --stop: #c8161d; --stop-fg: #ffffff;
+  --ok: #17763a; --diff: #a64b00; --nc: #5d6b79;
+  --tool: #1c5ea8; --ext: #7a3db8;
+  --warn-bg: #fff3d1; --warn-fg: #4f3a00;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "Roboto Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1216; --panel: #171d23; --sunk: #11171c; --fg: #e9eef3; --muted: #9ba7b3; --line: #2b343d;
+    --accent: #5d9de2; --accent-fg: #051321;
+    --stop: #e0262d; --stop-fg: #ffffff;
+    --ok: #5ccb88; --diff: #f0a35a; --nc: #9aa8b6;
+    --tool: #6aa8ec; --ext: #b78cf0;
+    --warn-bg: #3a2f12; --warn-fg: #ffe2a0;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; } /* l'attributo hidden vince sempre (l'allarme usa display:flex) */
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font: 17px/1.45 var(--font);
+  padding-left: max(14px, env(safe-area-inset-left, 0px)); padding-right: max(14px, env(safe-area-inset-right, 0px));
+  padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px));
+}
+button { font: inherit; }
+h1 { font-size: 1.15rem; margin: 0; }
+h2 { font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+p { margin: 0; }
+.num { font-variant-numeric: tabular-nums; }
+main { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; padding-top: 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; }
+
+/* Barra di stato in alto */
+.status {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; margin: 0 calc(-1 * max(14px, env(safe-area-inset-left, 0px))) 0;
+  padding: 8px max(14px, env(safe-area-inset-left, 0px)); background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.status-inner { max-width: 680px; margin: 0 auto; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 12px; align-items: center; }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.pill { font-size: .78rem; font-weight: 600; padding: 3px 8px; border-radius: 999px; background: var(--sunk); color: var(--muted); white-space: nowrap; }
+.pill.ok { color: var(--ok); } .pill.bad { color: var(--stop-fg); background: var(--stop); } .pill.warn { color: var(--warn-fg); background: var(--warn-bg); }
+.speed { text-align: right; line-height: 1; }
+.speed b { font-size: 2.1rem; font-variant-numeric: tabular-nums; }
+.speed small { display: block; font-size: .72rem; color: var(--muted); margin-top: 3px; }
+.lastevt { grid-column: 1 / -1; font-size: .82rem; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Pulsanti */
+.btn { min-height: 56px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); padding: 8px 14px; font-weight: 700; cursor: pointer; }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.btn.big { min-height: 68px; font-size: 1.1rem; width: 100%; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn:focus-visible, .stopbtn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; }
+.row > .btn { flex: 1 1 140px; }
+
+/* Lista di controllo */
+.check { display: flex; gap: 12px; align-items: center; min-height: 56px; padding: 6px 4px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.check:last-of-type { border-bottom: 0; }
+.check input { width: 30px; height: 30px; accent-color: var(--accent); flex: none; }
+.warnbox { background: var(--warn-bg); color: var(--warn-fg); border-radius: 10px; padding: 12px; font-weight: 600; margin: 12px 0; }
+
+/* Pannello del test in corso */
+#panel h3 { margin: 0 0 4px; font-size: 1.25rem; text-wrap: balance; }
+#instr { font-size: 1.15rem; font-weight: 600; min-height: 1.5em; margin: 8px 0; }
+#countdown { font-size: 4.5rem; font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; color: var(--accent); line-height: 1.1; }
+.prompt { border: 2px solid var(--accent); border-radius: 12px; padding: 12px; margin: 10px 0; display: flex; flex-direction: column; gap: 10px; }
+.prompt .ptitle { font-size: 1.2rem; font-weight: 800; }
+.prompt .choices { display: flex; flex-direction: column; gap: 10px; }
+.prompt .choices .btn { min-height: 72px; font-size: 1.1rem; }
+.prompt textarea { width: 100%; min-height: 64px; font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--sunk); color: var(--fg); padding: 8px; }
+.feed { list-style: none; margin: 0; padding: 0; font-size: .86rem; }
+.feed li { padding: 6px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto minmax(0,1fr); gap: 2px 8px; }
+.badge { font-size: .7rem; font-weight: 800; letter-spacing: .04em; padding: 2px 6px; border-radius: 5px; align-self: start; }
+.badge.tool { background: var(--tool); color: var(--accent-fg); }
+.badge.ext { background: var(--ext); color: #fff; }
+.rule { grid-column: 2; color: var(--muted); font-size: .78rem; }
+.checks { list-style: none; margin: 8px 0 0; padding: 0; font-size: .88rem; }
+.checks li { padding: 6px 0; border-top: 1px solid var(--line); }
+.v-ok { color: var(--ok); font-weight: 800; } .v-diff { color: var(--diff); font-weight: 800; } .v-nc { color: var(--nc); font-weight: 800; }
+.src { font-size: .7rem; font-weight: 800; color: var(--muted); letter-spacing: .04em; }
+
+/* Elenco test */
+.tests { list-style: none; margin: 0; padding: 0; }
+.tests li { display: grid; grid-template-columns: 44px minmax(0,1fr); gap: 4px 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.tests li:first-child { border-top: 0; }
+.tid { font-weight: 800; font-size: 1.05rem; color: var(--accent); padding-top: 2px; }
+.ttitle { font-weight: 700; }
+.tmeta { font-size: .8rem; color: var(--muted); }
+.tact { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.tact .btn { min-height: 48px; flex: 1 1 110px; }
+.chip { display: inline-block; font-size: .72rem; font-weight: 800; padding: 1px 7px; border-radius: 999px; background: var(--sunk); color: var(--muted); margin-left: 6px; vertical-align: 1px; }
+.chip.completato { color: var(--ok); } .chip.interrotto { color: var(--stop-fg); background: var(--stop); } .chip.in-corso { color: var(--accent-fg); background: var(--accent); }
+.why { grid-column: 2; font-size: .78rem; color: var(--diff); }
+
+/* Report e registro */
+textarea.note { width: 100%; min-height: 56px; font: inherit; font-size: .9rem; border-radius: 8px; border: 1px solid var(--line); background: var(--sunk); color: var(--fg); padding: 8px; }
+label.nl { font-size: .82rem; font-weight: 700; color: var(--muted); display: block; margin: 10px 0 4px; }
+pre.box { font-family: var(--mono); font-size: .72rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow: auto; background: var(--sunk); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 10px 0 0; }
+details summary { cursor: pointer; font-weight: 700; min-height: 40px; display: flex; align-items: center; }
+.rules { font-size: .9rem; padding-left: 1.2em; margin: 6px 0 0; }
+.rules li { margin: 4px 0; }
+
+/* Stop fisso in basso: sempre visibile, sopra a tutto (regola 3) */
+.stopbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 100; background: var(--panel); border-top: 1px solid var(--line);
+  padding: 10px max(14px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(14px, env(safe-area-inset-left, 0px)); }
+.stopbtn { display: block; width: 100%; max-width: 680px; margin: 0 auto; min-height: 84px; border: 0; border-radius: 14px; background: var(--stop); color: var(--stop-fg);
+  font-size: 1.9rem; font-weight: 900; letter-spacing: .08em; cursor: pointer; }
+.stopbtn small { display: block; font-size: .78rem; font-weight: 600; letter-spacing: 0; opacity: .9; }
+
+/* Allarme a tutto schermo (collegamento perso, Stop manuale) */
+.overlay { position: fixed; inset: 0; z-index: 90; background: var(--stop); color: var(--stop-fg); display: flex; flex-direction: column; justify-content: center; gap: 16px;
+  padding: calc(20px + env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px)) calc(130px + env(safe-area-inset-bottom, 0px)) max(20px, env(safe-area-inset-left, 0px)); }
+.overlay h2 { color: var(--stop-fg); font-size: 1.6rem; letter-spacing: .02em; text-transform: none; margin: 0; }
+.overlay p { font-size: 1.15rem; font-weight: 600; }
+.overlay .btn { background: #fff; color: #7a0a0e; border: 0; min-height: 72px; font-size: 1.15rem; }
+@media (prefers-reduced-motion: no-preference) { .overlay.blink { animation: blink 1s steps(2) infinite; } @keyframes blink { 50% { filter: brightness(.82); } } }
+</style>
+</head>
+<body>
+
+<header class="status" aria-label="Stato">
+  <div class="status-inner">
+    <div class="pills" id="pills"></div>
+    <div class="speed"><b id="spd">—</b><small>nei dati (impostata)</small></div>
+    <div class="lastevt" id="lastevt">Nessun evento</div>
+  </div>
+</header>
+
+<main>
+  <section class="card" id="setup" aria-labelledby="h-setup">
+    <h2 id="h-setup">Prima di iniziare</h2>
+    <h1>Banco prova Run100E</h1>
+    <p style="margin-top:6px;color:var(--muted)">Prove FTMS automatiche su DOMYOS-TC-7417. Il tool ti chiama solo per gesti fisici e osservazioni.</p>
+    <div class="warnbox" role="note">Se il collegamento Bluetooth cade, il nastro continua alla velocità dell'ultimo comando. Fermalo con lo Stop della console o togliendo la chiave.</div>
+    <fieldset style="border:0;padding:0;margin:0" id="checklist">
+      <legend class="nl" style="margin-top:0">Lista di controllo (tutte obbligatorie)</legend>
+      <label class="check"><input type="checkbox" id="chk-empty"> Nastro vuoto, nessun oggetto sopra</label>
+      <label class="check"><input type="checkbox" id="chk-key"> Chiave di sicurezza inserita</label>
+      <label class="check"><input type="checkbox" id="chk-hand"> Mano vicino alla chiave</label>
+      <label class="check"><input type="checkbox" id="chk-nobody"> Nessuno sul nastro</label>
+    </fieldset>
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary big" id="btnConnect" type="button">Collega il tapis roulant</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="btnWake" type="button">Riattiva schermo acceso</button>
+      <button class="btn" id="btnDisconnect" type="button">Scollega</button>
+    </div>
+    <details style="margin-top:10px">
+      <summary>Regole di sicurezza attive</summary>
+      <ul class="rules" id="rules"></ul>
+    </details>
+  </section>
+
+  <section class="card" id="panel" hidden aria-live="polite">
+    <h2 id="panelEyebrow">Test</h2>
+    <h3 id="panelTitle"></h3>
+    <p id="panelDesc" style="color:var(--muted);font-size:.92rem"></p>
+    <div id="intro" hidden>
+      <div class="warnbox">Nastro vuoto, nessuno sopra, mano vicino alla chiave. Lo Stop rosso in basso funziona sempre.</div>
+      <div class="row">
+        <button class="btn primary big" id="btnBegin" type="button">Avvia</button>
+        <button class="btn" id="btnCancelIntro" type="button">Annulla</button>
+      </div>
+    </div>
+    <div id="live" hidden>
+      <p id="instr"></p>
+      <div id="countdown" hidden></div>
+      <div id="prompt"></div>
+      <h2 style="margin-top:12px">Eventi su 0x2ADA</h2>
+      <ul class="feed" id="feed"></ul>
+      <p class="rule" id="corrRule" style="margin-top:6px"></p>
+      <h2 style="margin-top:12px">Verifiche</h2>
+      <ul class="checks" id="checks"></ul>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="btnAbort" type="button">Interrompi il test (invia Stop)</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="h-tests">
+    <h2 id="h-tests">Test, dal più sicuro al più impegnativo</h2>
+    <ul class="tests" id="tests"></ul>
+  </section>
+
+  <section class="card" aria-labelledby="h-rep">
+    <h2 id="h-rep">Report e osservazioni</h2>
+    <p style="font-size:.9rem;color:var(--muted)">Le note che scrivi qui finiscono nel report come osservazioni a voce, separate dai dati misurati.</p>
+    <div id="notes"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="btnReport" type="button">Aggiorna il report</button>
+      <button class="btn" id="btnCopyReport" type="button">Copia report</button>
+      <button class="btn" id="btnSaveReport" type="button">Scarica report .txt</button>
+    </div>
+    <pre class="box" id="reportText">Il report compare qui.</pre>
+  </section>
+
+  <section class="card" aria-labelledby="h-log">
+    <h2 id="h-log">Registro</h2>
+    <label class="check" style="min-height:44px;border:0"><input type="checkbox" id="chkShowData"> Mostra anche i pacchetti Treadmill Data</label>
+    <div class="row">
+      <button class="btn" id="btnCopyLog" type="button">Copia registro</button>
+      <button class="btn" id="btnSaveLog" type="button">Scarica .txt</button>
+      <button class="btn" id="btnSaveCsv" type="button">Scarica .csv</button>
+    </div>
+    <pre class="box" id="log"></pre>
+  </section>
+</main>
+
+<div class="overlay blink" id="overlay" hidden role="alertdialog" aria-labelledby="ovTitle">
+  <h2 id="ovTitle">COLLEGAMENTO PERSO</h2>
+  <p id="ovText"></p>
+  <p id="ovProgress" style="font-size:1rem;opacity:.9"></p>
+  <button class="btn" id="ovAck" type="button">Il nastro è fermo</button>
+</div>
+
+<footer class="stopbar">
+  <button class="stopbtn" id="btnStop" type="button">STOP<small>invia 08 01 e interrompe il test</small></button>
+</footer>
+
+<script id="core">
+/* =========================================================================
+ * NUCLEO – nessun accesso al DOM. Gira identico nel browser e nel simulatore.
+ * ========================================================================= */
+(function (root) {
+'use strict';
+
+const TOOL_VERSION = '1.0.0';
+const ASSUMPTIONS_VERSION = 'v2 del 27/10/2026';
+
+/* -------------------------------------------------------------------------
+ * COSTANTI DI SICUREZZA. Ogni valore qui è una regola, non una preferenza.
+ * Object.freeze impedisce che altro codice le modifichi a runtime.
+ * ------------------------------------------------------------------------- */
+const SAFETY = Object.freeze({
+  // Regola 1: tetto assoluto. Nessun Set Target Speed sopra questo valore
+  // viene mai scritto, in nessun test. Controllato in tre punti: setSpeed(),
+  // _assertWritable() subito prima della scrittura, e simulatore.
+  SPEED_CAP_CENTI: 1000,            // 10,0 km/h in unità di 0,01 km/h
+  SPEED_MIN_CENTI: 100,             // 1,0 km/h: minimo di Supported Speed Range
+  BELOW_MIN_TEST_CENTI: 50,         // 0,5 km/h: unico valore fuori range ammesso, solo in T3
+  // Regola 4: una risposta che manca oltre 2 s provoca lo Stop automatico.
+  RESPONSE_TIMEOUT_MS: 2000,
+  // Regola 7 / A12: durata massima di una fase a velocità non nulla.
+  PHASE_MAX_MS: 60000,
+  PHASE_PREWARN_MS: 5000,           // A59: bip 5 s prima della scadenza
+  WARN_LEAD_MS: 3000,               // A12: avviso sonoro 3 s prima di un cambio
+  // §6 / A30: finestra di correlazione tra comando del tool ed evento.
+  CORRELATION_WINDOW_MS: 1500,
+  // A36: un 05 esterno fino a 2,0 km/h entro 3 s da uno Start è tollerato.
+  START_SPEED_TOLERANCE_MS: 3000,
+  START_SPEED_TOLERANCE_MAX_CENTI: 200,
+  // Regola 8: ripartenza dopo la chiave solo con gesto + conto alla rovescia.
+  RESTART_COUNTDOWN_S: 5,
+  RESTART_PERMIT_MS: 3000,          // A47: il permesso scade dopo 3 s
+  STOP_BUSY_RETRY_MS: 1500,         // A39: Stop ripetuto se il GATT è occupato
+  RECONNECT_ATTEMPTS: 30,           // A54
+  RECONNECT_INTERVAL_MS: 1000,
+  OVERSPEED_DATA_REPEAT_MS: 3000,
+});
+
+const V = Object.freeze({ OK: 'OK', DIFF: 'DIVERSO DALL\'ATTESO', NC: 'NON CONCLUSIVO' });
+
+const SERVICES = [0x1826, 0x180A, 0x180D];
+// Il prefisso del nome è sensibile alle maiuscole: il 27/10 il tapis roulant
+// si è presentato come «Domyos-TC-7417», nell'Handoff come «DOMYOS-TC-7417».
+const NAME_FILTERS = [{ namePrefix: 'DOMYOS' }, { namePrefix: 'Domyos' }];
+
+// Elenco chiuso delle caratteristiche raggiungibili. Solo 'cp' è scrivibile.
+// I servizi proprietari 49535343-… e 02f00000-… non compaiono qui né in
+// optionalServices: Chrome non li espone alla pagina.
+const CH = Object.freeze({
+  feature:  { svc: 0x1826, chr: 0x2ACC, name: 'Fitness Machine Feature' },
+  data:     { svc: 0x1826, chr: 0x2ACD, name: 'Treadmill Data' },
+  training: { svc: 0x1826, chr: 0x2AD3, name: 'Training Status' },
+  range:    { svc: 0x1826, chr: 0x2AD4, name: 'Supported Speed Range' },
+  cp:       { svc: 0x1826, chr: 0x2AD9, name: 'Control Point', writable: true },
+  status:   { svc: 0x1826, chr: 0x2ADA, name: 'Fitness Machine Status' },
+  bsl:      { svc: 0x180D, chr: 0x2A38, name: 'Body Sensor Location' },
+  dis_manufacturer: { svc: 0x180A, chr: 0x2A29, name: 'Produttore' },
+  dis_model:        { svc: 0x180A, chr: 0x2A24, name: 'Modello' },
+  dis_fw:           { svc: 0x180A, chr: 0x2A26, name: 'Revisione firmware' },
+  dis_sw:           { svc: 0x180A, chr: 0x2A28, name: 'Revisione software' },
+  dis_sysid:        { svc: 0x180A, chr: 0x2A23, name: 'System ID' },
+});
+
+/* ----------------------------- utilità ----------------------------------- */
+const p2 = (n) => String(n).padStart(2, '0');
+const p3 = (n) => String(n).padStart(3, '0');
+function hex(b) { if (!b) return ''; return Array.from(b, (x) => (x & 0xFF).toString(16).toUpperCase().padStart(2, '0')).join(' '); }
+const u16 = (b, o) => (b[o] | (b[o + 1] << 8)) >>> 0;
+const u24 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16)) >>> 0;
+const s16 = (b, o) => { const v = u16(b, o); return v & 0x8000 ? v - 0x10000 : v; };
+const h16 = (n) => '0x' + n.toString(16).toUpperCase().padStart(4, '0');
+function kmh(c) { if (c == null) return '—'; const v = c / 100; return (c % 10 === 0 ? v.toFixed(1) : v.toFixed(2)).replace('.', ',') + ' km/h'; }
+function msTxt(x) { return x == null ? '—' : `${Math.round(x)} ms`; }
+function clock(t) { const d = new Date(t); return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p3(Math.floor(d.getMilliseconds()))}`; }
+function dateTime(t) { const d = new Date(t); return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${clock(t)}`; }
+function textOf(b) { return new TextDecoder('utf-8').decode(b).replace(/\0+$/, ''); }
+function sameSet(a, b) { return a.length === b.length && a.every((x) => b.includes(x)); }
+
+/* ----------------------------- errori ------------------------------------ */
+class SafetyError extends Error { constructor(m) { super(m); this.name = 'SafetyError'; } }
+class ResponseTimeout extends Error { constructor(m) { super(m); this.name = 'ResponseTimeout'; } }
+class WriteFailed extends Error { constructor(m) { super(m); this.name = 'WriteFailed'; } }
+class NotConnected extends Error { constructor(m) { super(m); this.name = 'NotConnected'; } }
+class Superseded extends Error { constructor(m) { super(m); this.name = 'Superseded'; } }
+class AbortTest extends Error { constructor(m) { super(m); this.name = 'AbortTest'; } }
+class CommandRejected extends Error {
+  constructor(resp, label) { super(`${label}: risposta ${hex(resp.bytes)} (${RESULT_NAMES[resp.result] || 'codice ' + resp.result})`); this.name = 'CommandRejected'; this.result = resp.result; this.response = resp; }
+}
+
+/* ------------------------ codifica e decodifica FTMS --------------------- */
+const RESULT_NAMES = { 1: 'successo', 2: 'operazione non supportata', 3: 'parametro non valido', 4: 'operazione fallita', 5: 'controllo non consentito' };
+const TRAINING_NAMES = { 0x00: 'Other', 0x01: 'Idle', 0x02: 'Warming Up', 0x03: 'Low Intensity Interval', 0x04: 'High Intensity Interval', 0x05: 'Recovery Interval', 0x06: 'Isometric', 0x07: 'Heart Rate Control', 0x08: 'Fitness Test', 0x09: 'Speed Outside Control Region – Low', 0x0A: 'Speed Outside Control Region – High', 0x0B: 'Cool Down', 0x0C: 'Watt Control', 0x0D: 'Manual Mode (Quick Start)', 0x0E: 'Pre-Workout', 0x0F: 'Post-Workout' };
+const MACHINE_FEATURES = ['velocità media', 'cadenza', 'distanza totale', 'inclinazione', 'dislivello', 'passo', 'conteggio passi', 'livello di resistenza', 'conteggio falcate', 'energia consumata', 'misura del battito', 'equivalente metabolico', 'tempo trascorso', 'tempo rimanente', 'misura della potenza', 'forza sul nastro e potenza', 'conservazione dati utente'];
+const TARGET_FEATURES = ['velocità', 'inclinazione', 'resistenza', 'potenza', 'battito', 'energia', 'passi', 'falcate', 'distanza', 'tempo di allenamento', 'tempo in 2 zone', 'tempo in 3 zone', 'tempo in 5 zone', 'simulazione bici', 'circonferenza ruota', 'spin down', 'cadenza'];
+const BSL_NAMES = ['Altro', 'Petto', 'Polso', 'Dito', 'Mano', 'Lobo dell\'orecchio', 'Piede'];
+
+const Ftms = {
+  requestControl: () => Uint8Array.of(0x00),
+  reset: () => Uint8Array.of(0x01),
+  start: () => Uint8Array.of(0x07),
+  stop: () => Uint8Array.of(0x08, 0x01),
+  pause: () => Uint8Array.of(0x08, 0x02),
+  setSpeed(c) {
+    if (!Number.isInteger(c) || c < 0 || c > 0xFFFF) throw new SafetyError('valore di velocità non valido');
+    return Uint8Array.of(0x02, c & 0xFF, (c >> 8) & 0xFF); // uint16 little-endian, 0,01 km/h
+  },
+  cmdType(b) { switch (b[0]) { case 0x00: return 'control'; case 0x01: return 'reset'; case 0x02: return 'speed'; case 0x07: return 'start'; case 0x08: return b[1] === 0x02 ? 'pause' : 'stop'; default: return 'unknown'; } },
+  cmdLabel(b) {
+    switch (Ftms.cmdType(b)) {
+      case 'control': return '00 Request Control'; case 'reset': return '01 Reset';
+      case 'speed': return `02 Set Target Speed ${kmh(u16(b, 1))}`; case 'start': return '07 Start/Resume';
+      case 'stop': return '08 01 Stop'; case 'pause': return '08 02 Pausa'; default: return 'sconosciuto';
+    }
+  },
+  decodeResponse(b) { if (b.length < 3 || b[0] !== 0x80) return null; return { reqOp: b[1], result: b[2], resultName: RESULT_NAMES[b[2]] || `codice ${b[2]}` }; },
+  decodeStatus(b) {
+    const code = b[0];
+    const e = { code, key: hex([code]), text: '', centi: null };
+    switch (code) {
+      case 0x01: e.text = 'Reset (significato da standard FTMS)'; break;
+      case 0x02: { const p = b.length > 1 ? b[1] : 0; e.key = `02 ${hex([p])}`; e.text = p === 1 ? 'Fermato dall\'utente: Stop' : p === 2 ? 'Fermato dall\'utente: Pausa' : 'Fermato o in pausa (parametro sconosciuto)'; break; }
+      case 0x03: e.text = 'Fermato dalla chiave di sicurezza'; break;
+      case 0x04: e.text = 'Avviato o ripreso dall\'utente'; break;
+      case 0x05: if (b.length >= 3) { e.centi = u16(b, 1); e.text = `Target Speed Changed ${kmh(e.centi)}`; } else e.text = 'Target Speed Changed (lunghezza non valida)'; break;
+      case 0xFF: e.text = 'Permesso di controllo perso (significato da standard FTMS)'; break;
+      default: e.text = 'evento sconosciuto';
+    }
+    return e;
+  },
+  // Treadmill Data: si leggono SEMPRE i flag (Handoff). Ordine dei campi da
+  // standard FTMS (A34). Layout osservato: flag A4 01, 14 byte.
+  decodeTreadmill(b) {
+    const d = { flags: null, len: b.length, expectedLen: null, ok: true, speedCenti: null, distance: null, pace: null, energy: null, energyHour: null, energyMin: null, hr: null, unknownBits: 0 };
+    if (b.length < 2) { d.ok = false; return d; }
+    const f = u16(b, 0); d.flags = f; let o = 2;
+    const has = (n) => o + n <= b.length;
+    if (!(f & 0x0001)) { if (has(2)) d.speedCenti = u16(b, o); o += 2; }
+    if (f & 0x0002) { o += 2; }
+    if (f & 0x0004) { if (has(3)) d.distance = u24(b, o); o += 3; }
+    if (f & 0x0008) { if (has(4)) { d.incl = s16(b, o) / 10; } o += 4; }
+    if (f & 0x0010) { o += 4; }
+    if (f & 0x0020) { if (has(1)) d.pace = b[o] / 10; o += 1; }
+    if (f & 0x0040) { o += 1; }
+    if (f & 0x0080) { if (has(5)) { d.energy = u16(b, o); d.energyHour = u16(b, o + 2); d.energyMin = b[o + 4]; } o += 5; }
+    if (f & 0x0100) { if (has(1)) d.hr = b[o]; o += 1; }
+    if (f & 0x0200) { o += 1; }
+    if (f & 0x0400) { if (has(2)) d.elapsed = u16(b, o); o += 2; }
+    if (f & 0x0800) { o += 2; }
+    if (f & 0x1000) { o += 4; }
+    d.unknownBits = f & 0xE000; d.expectedLen = o;
+    if (o !== b.length || d.unknownBits) d.ok = false;
+    return d;
+  },
+  decodeTraining(b) { const s = b.length > 1 ? b[1] : null; return { status: s, name: s == null ? 'lunghezza non valida' : (TRAINING_NAMES[s] || 'sconosciuto') + (s === 0x01 || s === 0x0D ? '' : ' (nome da standard FTMS)') }; },
+  decodeRange(b) { return b.length >= 6 ? { min: u16(b, 0), max: u16(b, 2), inc: u16(b, 4) } : null; },
+  decodeFeature(b) {
+    if (b.length < 8) return null;
+    const m = (u16(b, 0) | (u16(b, 2) << 16)) >>> 0, t = (u16(b, 4) | (u16(b, 6) << 16)) >>> 0;
+    const bits = (v, names) => names.filter((_, i) => (v >>> i) & 1);
+    return { machine: bits(m, MACHINE_FEATURES), targets: bits(t, TARGET_FEATURES) };
+  },
+};
+function dataText(d) {
+  if (d.flags == null) return 'pacchetto troppo corto';
+  const parts = [`v ${kmh(d.speedCenti)}`];
+  if (d.distance != null) parts.push(`dist ${d.distance} m`);
+  if (d.pace != null) parts.push(`passo ${String(d.pace.toFixed(1)).replace('.', ',')} km/min`);
+  if (d.energy != null) parts.push(`energia ${d.energy} kcal (${d.energyHour}/h, ${d.energyMin}/min)`);
+  if (d.hr != null) parts.push(`battito ${d.hr}`);
+  if (d.flags !== 0x01A4) parts.push(`flag ${h16(d.flags)}`);
+  if (!d.ok) parts.push(`LUNGHEZZA ${d.len} attesa ${d.expectedLen}`);
+  return parts.join(' · ');
+}
+
+/* ------------------------------- registro -------------------------------- */
+// Ogni scrittura, indicazione, notifica, evento, lettura e risposta tua viene
+// registrata con timestamp in millisecondi, byte grezzi e decodifica.
+class Logger {
+  constructor(env) { this.env = env; this.entries = []; this.t0 = env.now(); this.listeners = new Set(); this.testId = ''; }
+  add(kind, { ch = '', bytes = null, text = '', note = '' } = {}) {
+    const t = this.env.now();
+    const e = { n: this.entries.length + 1, t, rel: Math.round(t - this.t0), test: this.testId, kind, ch, hex: bytes ? hex(bytes) : '', text, note };
+    this.entries.push(e);
+    for (const l of this.listeners) { try { l(e); } catch (_) { /* l'interfaccia non deve fermare il registro */ } }
+    return e;
+  }
+  line(e) { return `${clock(e.t)} +${String(e.rel).padStart(8)}ms ${(e.test || '--').padEnd(3)} ${e.kind.padEnd(10)} ${(e.ch || '').padEnd(4)} ${e.hex ? '[' + e.hex + '] ' : ''}${e.text}${e.note ? ' · ' + e.note : ''}`; }
+  toText(header) { return [header, '', 'Ora locale    +ms dall\'apertura  Test  Tipo  Car.  [byte] decodifica', ...this.entries.map((e) => this.line(e))].join('\n'); }
+  toCSV() {
+    const q = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
+    const rows = ['n;ora_iso_utc;ora_locale;ms_epoch;ms_relativi;test;tipo;caratteristica;hex;decodifica;nota'];
+    for (const e of this.entries) rows.push([e.n, new Date(e.t).toISOString(), dateTime(e.t), Math.round(e.t), e.rel, e.test, e.kind, e.ch, e.hex, e.text, e.note].map(q).join(';'));
+    return rows.join('\r\n');
+  }
+}
+
+/* ------------------------- correlazione eventi (§6) ---------------------- */
+const EVENT_TO_CMD = { '04': 'start', '05': 'speed', '02 01': 'stop', '02 02': 'pause', '01': 'reset' };
+const CMD_TYPE_LABEL = { start: '07', speed: '02 con lo stesso valore', stop: '08 01', pause: '08 02', reset: '01' };
+const CORRELATION_RULE = `Un evento è «causato dal tool» se arriva entro ${SAFETY.CORRELATION_WINDOW_MS} ms dall'invio di un comando dello stesso tipo: 04↔07, 05↔02 con lo stesso valore, 02 01↔08 01, 02 02↔08 02, 01↔01. Ogni comando spiega al massimo un evento. Altrimenti è «esterno». 03 (chiave) è sempre esterno. (A30, A55)`;
+class Correlator {
+  constructor() { this.cmds = []; }
+  note(cmd) { this.cmds.push({ ...cmd, matched: false }); if (this.cmds.length > 300) this.cmds.shift(); }
+  classify(evt) {
+    const W = SAFETY.CORRELATION_WINDOW_MS;
+    const type = EVENT_TO_CMD[evt.key];
+    if (!type) return { origin: 'external', rule: evt.key === '03' ? 'la chiave è sempre un evento esterno' : 'nessun comando del tool produce questo evento' };
+    let best = null;
+    for (const c of this.cmds) {
+      if (c.type !== type || c.matched) continue;
+      const dt = evt.t - c.tSend;
+      if (dt < 0 || dt > W) continue;
+      if (type === 'speed' && c.centi !== evt.centi) continue;
+      if (!best || c.tSend > best.tSend) best = c;
+    }
+    if (best) { best.matched = true; return { origin: 'tool', cmdId: best.id, deltaMs: evt.t - best.tSend, rule: `+${Math.round(evt.t - best.tSend)} ms dal comando #${best.id} ${best.label} (finestra ${W} ms)` }; }
+    return { origin: 'external', rule: `nessun comando ${CMD_TYPE_LABEL[type]} nei ${W} ms precedenti` };
+  }
+}
+
+const defaultPolicy = () => ({ allowExternal: new Set() });
+
+/* =========================================================================
+ * CONTROLLORE DI SICUREZZA – l'unico punto da cui partono scritture.
+ * ========================================================================= */
+class SafetyController {
+  constructor({ env, transport, log, ui }) {
+    this.env = env; this.t = transport; this.log = log; this.ui = ui;
+    this.corr = new Correlator();
+    this.link = 'disconnected';              // disconnected | connected | lost | reconnecting
+    this.subs = { cp: false, status: false, training: false, data: false };
+    this.keyState = 'ok';                    // ok | removed | stopped-after-key (regola 8)
+    this.restartPermit = null;
+    this.pending = null; this.late = []; this.seq = 0; this.history = [];
+    this.phase = null; this.lastStartT = null; this.stoppedConfirmedT = null;
+    this.activeTestId = null; this.policy = defaultPolicy();
+    this.lastData = null; this.lastTraining = null; this.lastEvent = null;
+    this.emergencyInProgress = null; this.lastAutoStop = null; this.lastOverspeedT = -Infinity;
+    this.manualStopRequired = false; this.userDisconnect = false; this.reconnecting = false;
+    this.onAbortTest = null; this.listeners = {}; this.flagsSeen = new Set();
+    this.t.onDisconnect = () => this._onDisconnect();
+  }
+  on(type, fn) { (this.listeners[type] = this.listeners[type] || new Set()).add(fn); }
+  _emit(type, x) { for (const fn of this.listeners[type] || []) { try { fn(x); } catch (e) { this.log.add('ERRORE', { text: `gestore ${type}: ${e.message}` }); } } }
+  _emitState() { this._emit('state', null); }
+  _delay(ms) { return new Promise((r) => this.env.setTimeout(r, ms)); }
+  allSubscribed() { return Object.values(this.subs).every(Boolean); }
+  get deviceName() { return this.t.name || ''; }
+
+  /* ---------------- collegamento e sottoscrizioni ---------------- */
+  async connect() {
+    await this.t.connect();
+    this.link = 'connected';
+    this.log.add('SISTEMA', { text: `collegato a ${this.t.name}` });
+    await this._subscribeAll();
+    this._emitState();
+  }
+  disconnect() {
+    if (this.activeTestId) throw new SafetyError('test in corso: usa Stop prima di scollegare');
+    this.userDisconnect = true; this.t.disconnect();
+  }
+  // Le sottoscrizioni si azzerano a ogni connessione (Handoff): si riattivano
+  // tutte. Prima le indicazioni del Control Point e gli eventi di Status,
+  // che servono alla sicurezza.
+  async _subscribeAll() {
+    const list = [
+      ['cp', (b) => this._onIndication(b), 'indicazioni'],
+      ['status', (b) => this._onStatus(b), 'notifiche'],
+      ['training', (b) => this._onTraining(b), 'notifiche'],
+      ['data', (b) => this._onData(b), 'notifiche'],
+    ];
+    for (const [key, fn, what] of list) {
+      try { await this.t.subscribe(key, fn); this.subs[key] = true; this.log.add('SISTEMA', { ch: CH[key].chr.toString(16).toUpperCase(), text: `${what} attive su ${h16(CH[key].chr)} ${CH[key].name}` }); }
+      catch (e) { this.subs[key] = false; this.log.add('ERRORE', { text: `${what} NON attive su ${h16(CH[key].chr)} ${CH[key].name}: ${e.name}: ${e.message}` }); }
+    }
+    this._emitState();
+  }
+  async read(key) {
+    const d = CH[key]; if (!d) throw new SafetyError('caratteristica non in elenco');
+    const t0 = this.env.now();
+    const b = await this.t.read(key);
+    this.log.add('LETTURA', { ch: d.chr.toString(16).toUpperCase(), bytes: b, text: `${d.name} (${msTxt(this.env.now() - t0)})` });
+    return b;
+  }
+
+  /* ---------------- controlli prima di ogni scrittura ---------------- */
+  // Ultima difesa: qualunque cosa arrivi qui viene ricontrollata.
+  _assertWritable(bytes) {
+    const LEN = { 0x00: 1, 0x01: 1, 0x02: 3, 0x07: 1, 0x08: 2 };
+    const op = bytes[0];
+    if (!(op in LEN) || bytes.length !== LEN[op]) throw new SafetyError(`comando ${hex(bytes)} non in elenco: NON inviato`);
+    if (op === 0x08 && bytes[1] !== 0x01 && bytes[1] !== 0x02) throw new SafetyError(`parametro di 08 non ammesso: ${hex(bytes)}`);
+    if (op === 0x02) {
+      const c = u16(bytes, 1);
+      if (c > SAFETY.SPEED_CAP_CENTI) throw new SafetyError(`velocità ${kmh(c)} oltre il tetto di 10,0 km/h: comando NON inviato (regola 1)`);
+      if (c < SAFETY.SPEED_MIN_CENTI && c !== SAFETY.BELOW_MIN_TEST_CENTI) throw new SafetyError(`velocità ${kmh(c)} sotto il minimo non ammessa: comando NON inviato (regola 1)`);
+    }
+  }
+  _requireTest(label) {
+    // A37: i comandi partono solo da un test in corso. Lo Stop è escluso:
+    // si può inviare sempre.
+    if (!this.activeTestId) throw new SafetyError(`${label} rifiutato: i comandi partono solo da un test in corso (A37)`);
+    if (this.manualStopRequired) throw new SafetyError(`${label} rifiutato: prima conferma che il nastro è fermo`);
+  }
+  _noteCmd(bytes, suffix = '') {
+    const id = ++this.seq; const type = Ftms.cmdType(bytes); const label = Ftms.cmdLabel(bytes);
+    const cmd = { id, type, label, op: bytes[0], bytes, tSend: this.env.now(), centi: type === 'speed' ? u16(bytes, 1) : null };
+    this.corr.note(cmd); this.history.push(cmd); if (this.history.length > 1000) this.history.shift();
+    this.log.add('SCRITTURA', { ch: '2AD9', bytes, text: `#${id} ${label}${suffix}` });
+    return cmd;
+  }
+  async _write(bytes, isStop) {
+    const t0 = this.env.now();
+    for (;;) {
+      try { return await this.t.write('cp', bytes); }
+      catch (e) {
+        // A39: Chrome rifiuta una scrittura se un'altra operazione GATT è in
+        // corso. Solo per lo Stop si riprova ogni 100 ms per 1,5 s.
+        const busy = /in progress|already/i.test(String(e && e.message));
+        if (isStop && busy && this.env.now() - t0 < SAFETY.STOP_BUSY_RETRY_MS) { this.log.add('SISTEMA', { text: 'GATT occupato: nuovo tentativo di Stop tra 100 ms' }); await this._delay(100); continue; }
+        throw e;
+      }
+    }
+  }
+  // Invio di un comando e attesa dell'indicazione. Un solo comando alla volta;
+  // lo Stop può scavalcare un comando in attesa.
+  _send(bytes, { expected = [1] } = {}) {
+    try { this._assertWritable(bytes); } catch (e) { this.log.add('SICUREZZA', { text: e.message }); return Promise.reject(e); }
+    const type = Ftms.cmdType(bytes); const label = Ftms.cmdLabel(bytes); const isStop = type === 'stop';
+    if (this.link !== 'connected' || !this.t.connected) return Promise.reject(new NotConnected(`${label}: tapis roulant non collegato`));
+    if (!this.subs.cp) return Promise.reject(new SafetyError(`${label}: indicazioni sul Control Point non attive, le risposte non sarebbero visibili`));
+    if (this.pending) {
+      if (isStop && this.pending.type === 'stop') return this.pending.shared; // un solo Stop alla volta
+      if (isStop) {
+        const old = this.pending; this.pending = null; this.env.clearTimeout(old.timer);
+        this.late.push({ op: old.op, until: this.env.now() + SAFETY.RESPONSE_TIMEOUT_MS + 3000 });
+        this.log.add('SISTEMA', { text: `Stop scavalca #${old.id} ${old.label} in attesa di risposta` });
+        old.reject(new Superseded(`${old.label}: superato dallo Stop`));
+      } else {
+        return Promise.reject(new SafetyError(`${label} rifiutato: #${this.pending.id} ${this.pending.label} attende ancora risposta (mai due comandi insieme)`));
+      }
+    }
+    const cmd = this._noteCmd(bytes);
+    let resolve, reject;
+    const p = new Promise((res, rej) => { resolve = res; reject = rej; });
+    p.catch(() => {});
+    const pend = { id: cmd.id, type, op: bytes[0], label, tSend: cmd.tSend, resolve, reject, timer: null, shared: null };
+    pend.timer = this.env.setTimeout(() => {
+      if (this.pending !== pend) return;
+      this.pending = null;
+      this.late.push({ op: pend.op, until: this.env.now() + 5000 });
+      this.log.add('SICUREZZA', { text: `#${cmd.id} ${label}: nessuna risposta entro ${SAFETY.RESPONSE_TIMEOUT_MS} ms (regola 4)` });
+      reject(new ResponseTimeout(`${label}: nessuna risposta entro ${SAFETY.RESPONSE_TIMEOUT_MS} ms`));
+    }, SAFETY.RESPONSE_TIMEOUT_MS);
+    this.pending = pend;
+    pend.shared = (async () => {
+      try { await this._write(bytes, isStop); cmd.tWritten = this.env.now(); }
+      catch (e) {
+        if (this.pending === pend) { this.pending = null; this.env.clearTimeout(pend.timer); }
+        this.log.add('ERRORE', { text: `#${cmd.id} ${label}: scrittura non riuscita (${e.name}: ${e.message})` });
+        throw new WriteFailed(`${label}: scrittura non riuscita (${e.message})`);
+      }
+      const r = await p;
+      const out = { ...r, rtt: r.tResp - cmd.tSend, cmd };
+      if (!expected.includes(r.result)) throw new CommandRejected(out, label);
+      return out;
+    })();
+    pend.shared.catch(() => {});
+    return pend.shared;
+  }
+
+  /* ---------------- comandi pubblici ---------------- */
+  async requestControl(o = {}) { this._requireTest('Request Control'); return this._send(Ftms.requestControl(), o); }
+  async start(o = {}) {
+    this._requireTest('Start');
+    // Regola 8: dopo un evento 03 nessuno Start senza (1) uno Stop già
+    // confermato, (2) un tuo gesto esplicito e (3) il conto alla rovescia.
+    if (this.keyState !== 'ok') {
+      if (this.keyState !== 'stopped-after-key') throw new SafetyError('Start bloccato: dopo la rimozione della chiave serve prima uno Stop (regola 8)');
+      const p = this.restartPermit; this.restartPermit = null;
+      if (!p || this.env.now() - p.t > SAFETY.RESTART_PERMIT_MS) throw new SafetyError('Start bloccato: dopo la chiave serve un tuo gesto esplicito e il conto alla rovescia (regola 8)');
+      this.log.add('SICUREZZA', { text: 'Start dopo la chiave autorizzato: Stop confermato, gesto e conto alla rovescia completati (regola 8)' });
+    }
+    const r = await this._send(Ftms.start(), o);
+    this.keyState = 'ok'; this.lastStartT = r.cmd.tSend; this._startPhase(); this._emitState();
+    return r;
+  }
+  setSpeed(centi, { allowBelowMin = false, expected = [1] } = {}) {
+    try { this._requireTest('Set Target Speed'); } catch (e) { return Promise.reject(e); }
+    if (!Number.isInteger(centi)) return Promise.reject(new SafetyError('velocità non intera in centesimi di km/h'));
+    if (centi > SAFETY.SPEED_CAP_CENTI) {
+      // Regola 1: un valore oltre il tetto è un errore di programma. Non si
+      // corregge in silenzio: niente scrittura, Stop e test interrotto (A10).
+      const m = `richiesta di ${kmh(centi)} oltre il tetto di 10,0 km/h: NON inviata (regola 1, A10)`;
+      this.emergencyStop(m); return Promise.reject(new SafetyError(m));
+    }
+    if (centi < SAFETY.SPEED_MIN_CENTI) {
+      const ok = allowBelowMin && centi === SAFETY.BELOW_MIN_TEST_CENTI && this.activeTestId === 'T3';
+      if (!ok) { const m = `richiesta di ${kmh(centi)} sotto il minimo: ammessa solo 0,5 km/h in T3 (regola 1, A11)`; this.emergencyStop(m); return Promise.reject(new SafetyError(m)); }
+    }
+    return this._send(Ftms.setSpeed(centi), { expected });
+  }
+  async pause(o = {}) { this._requireTest('Pausa'); const r = await this._send(Ftms.pause(), o); this._endPhase(); this._emitState(); return r; }
+  reset(o = {}) {
+    try {
+      this._requireTest('Reset');
+      if (this.activeTestId !== 'T9') throw new SafetyError('Reset consentito solo in T9 (A33)');
+      if (this.phase) throw new SafetyError('Reset rifiutato: il nastro risulta in moto');
+      if (!this.stoppedConfirmedT || (this.lastStartT && this.stoppedConfirmedT < this.lastStartT)) throw new SafetyError('Reset rifiutato: serve la tua conferma che il nastro è fermo (A33)');
+    } catch (e) { return Promise.reject(e); }
+    return this._send(Ftms.reset(), { expected: [1, 2, 3, 4, 5], ...o });
+  }
+  // Lo Stop è sempre ammesso, anche senza test in corso.
+  async stop(reason = '', { expected = [1] } = {}) {
+    if (reason) this.log.add('SISTEMA', { text: `Stop: ${reason}` });
+    let r;
+    try { r = await this._send(Ftms.stop(), { expected }); }
+    catch (e) {
+      if (e instanceof ResponseTimeout || e instanceof WriteFailed) {
+        // A17: Stop senza risposta → secondo invio, poi Stop manuale.
+        this.log.add('SICUREZZA', { text: 'Stop senza conferma: secondo invio (A17)' });
+        try { r = await this._send(Ftms.stop(), { expected }); }
+        catch (e2) { this._requireManualStop(`Stop non confermato due volte (${e2.message})`); throw e2; }
+      } else if (e instanceof CommandRejected && e.result === 5) {
+        // A19: controllo non consentito → Request Control e nuovo Stop.
+        this.log.add('SICUREZZA', { text: 'Stop rifiutato (controllo non consentito): Request Control e nuovo Stop (A19)' });
+        try { await this._send(Ftms.requestControl()); r = await this._send(Ftms.stop(), { expected }); }
+        catch (e2) { this._requireManualStop(`Stop non riuscito (${e2.message})`); throw e2; }
+      } else {
+        this._requireManualStop(`Stop non riuscito (${e.message})`); throw e;
+      }
+    }
+    this._endPhase();
+    if (this.keyState === 'removed') this.keyState = 'stopped-after-key';
+    this._emitState();
+    return r;
+  }
+  grantRestartAfterKey() {
+    if (this.keyState !== 'stopped-after-key') throw new SafetyError('ripartenza dopo la chiave non autorizzabile: manca lo Stop (regola 8)');
+    this.restartPermit = { t: this.env.now() };
+    this.log.add('SICUREZZA', { text: `permesso di ripartenza concesso per ${SAFETY.RESTART_PERMIT_MS} ms (regola 8, A47)` });
+  }
+  confirmStoppedByUser() {
+    this.stoppedConfirmedT = this.env.now();
+    this.log.add('UTENTE', { text: 'confermato: il nastro è fermo' });
+    if (this.manualStopRequired) { this.manualStopRequired = false; this.ui.alert('clear'); }
+    this._emitState();
+  }
+  _requireManualStop(why) {
+    this.manualStopRequired = true;
+    const msg = `${why}. Ferma il nastro con lo Stop della console o togliendo la chiave.`;
+    this.log.add('SICUREZZA', { text: msg });
+    this.ui.alert('manual', msg);
+    this._emitState();
+  }
+
+  /* ---------------- Stop automatico (regola 4) ---------------- */
+  emergencyStop(reason, { abortTest = true } = {}) {
+    this.log.add('SICUREZZA', { text: `Stop automatico: ${reason}` });
+    if (abortTest && this.onAbortTest) this.onAbortTest(reason);
+    this.ui.beep('alarm');
+    if (this.link !== 'connected' || !this.t.connected) {
+      if (!this.manualStopRequired) this._requireManualStop(`${reason}; tapis roulant non collegato`);
+      return Promise.resolve({ ok: false });
+    }
+    if (this.emergencyInProgress) return this.emergencyInProgress;
+    const t = this.env.now();
+    const done = (async () => {
+      try { const r = await this.stop(reason); return { ok: true, r }; }
+      catch (e) { this.log.add('ERRORE', { text: `Stop automatico non riuscito: ${e.message}` }); if (!this.manualStopRequired) this._requireManualStop('Stop automatico non riuscito'); return { ok: false, error: e }; }
+      finally { if (this.emergencyInProgress === done) this.emergencyInProgress = null; }
+    })();
+    this.emergencyInProgress = done; this.lastAutoStop = { reason, t, done };
+    return done;
+  }
+  // A05: Chrome può sospendere una pagina in background, e il nastro non si
+  // ferma da solo. Appena la pagina viene nascosta si invia Stop.
+  onPageHidden() { if (this.link === 'connected') this.emergencyStop('pagina in background o schermo spento (A05)'); }
+  onPageUnload() { if (this.link === 'connected' && this.t.connected) { try { this._noteCmd(Ftms.stop(), ' (chiusura della pagina)'); this.t.write('cp', Ftms.stop()).catch(() => {}); } catch (_) { /* nulla da fare */ } } }
+  userStop() {
+    if (this.link !== 'connected') { this._requireManualStop('Stop premuto ma tapis roulant non collegato'); return Promise.resolve({ ok: false }); }
+    return this.emergencyStop('Stop premuto da te (regola 3)');
+  }
+
+  /* ---------------- fasi a velocità non nulla (regola 7) ---------------- */
+  _startPhase() {
+    this._endPhase();
+    const ph = { t0: this.env.now() };
+    ph.pre = this.env.setTimeout(() => { this.ui.beep('warn'); this.log.add('SICUREZZA', { text: `${SAFETY.PHASE_PREWARN_MS / 1000} s alla durata massima della fase` }); }, SAFETY.PHASE_MAX_MS - SAFETY.PHASE_PREWARN_MS);
+    ph.timer = this.env.setTimeout(() => { if (this.phase === ph) { this.phase = null; this.emergencyStop(`durata massima della fase (${SAFETY.PHASE_MAX_MS / 1000} s) raggiunta (regola 7, A12)`); } }, SAFETY.PHASE_MAX_MS);
+    this.phase = ph;
+  }
+  _endPhase() { if (this.phase) { this.env.clearTimeout(this.phase.pre); this.env.clearTimeout(this.phase.timer); this.phase = null; } }
+
+  /* ---------------- dati in arrivo ---------------- */
+  _onIndication(b) {
+    const t = this.env.now();
+    const r = Ftms.decodeResponse(b);
+    if (!r) { this.log.add('ANOMALIA', { ch: '2AD9', bytes: b, text: 'indicazione non riconosciuta' }); this.emergencyStop('indicazione non riconosciuta sul Control Point (regola 4)'); return; }
+    const p = this.pending;
+    if (p && p.op === r.reqOp) {
+      this.pending = null; this.env.clearTimeout(p.timer);
+      this.log.add('INDICAZ', { ch: '2AD9', bytes: b, text: `risposta a #${p.id} ${p.label}: ${r.resultName} · ${msTxt(t - p.tSend)}` });
+      p.resolve({ result: r.result, bytes: b, tResp: t });
+      return;
+    }
+    const li = this.late.findIndex((x) => x.op === r.reqOp && t <= x.until);
+    if (li >= 0) { this.late.splice(li, 1); this.log.add('INDICAZ', { ch: '2AD9', bytes: b, text: `risposta tardiva a un comando già scaduto o superato: ${r.resultName}` }); return; }
+    this.log.add('INDICAZ', { ch: '2AD9', bytes: b, text: `risposta inattesa (opcode ${hex([r.reqOp])}, nessun comando in attesa): ${r.resultName}` });
+    this.emergencyStop('risposta inattesa sul Control Point (regola 4)');
+  }
+  _onStatus(b) {
+    const t = this.env.now();
+    const evt = Ftms.decodeStatus(b); evt.t = t;
+    const cls = this.corr.classify(evt);
+    let allowed = false;
+    if (cls.origin === 'tool') allowed = true;
+    else if (this.policy.allowExternal.has(evt.key)) { allowed = true; cls.note = 'esterno atteso in questa fase'; }
+    else if (evt.key === '05' && this.lastStartT != null && t - this.lastStartT <= SAFETY.START_SPEED_TOLERANCE_MS && evt.centi != null && evt.centi <= SAFETY.START_SPEED_TOLERANCE_MAX_CENTI) {
+      allowed = true; cls.note = 'tollerato: velocità di partenza subito dopo uno Start (A36)';
+    }
+    const item = { evt, cls, t, allowed };
+    this.lastEvent = item;
+    this.log.add('EVENTO', { ch: '2ADA', bytes: b, text: `${evt.key} ${evt.text}`, note: `${cls.origin === 'tool' ? 'CAUSATO DAL TOOL' : 'ESTERNO'} · regola: ${cls.rule}${cls.note ? ' · ' + cls.note : ''}${allowed ? '' : ' · NON ATTESO'}` });
+    this._emit('event', item);
+    this._emitState();
+    // A14: velocità oltre il tetto anche se impostata dalla console.
+    if (evt.key === '05' && evt.centi != null && evt.centi > SAFETY.SPEED_CAP_CENTI) { this.emergencyStop(`evento 05 a ${kmh(evt.centi)} oltre il tetto di 10,0 km/h (A14)`); return; }
+    // A15: chiave tolta → Stop immediato, sempre. Il test si interrompe solo
+    // se l'evento non era atteso (in T8 è atteso).
+    if (evt.key === '03') { this.keyState = 'removed'; this._endPhase(); this._emitState(); this.emergencyStop('chiave tolta: Stop immediato (A15)', { abortTest: !allowed }); return; }
+    // A18: evento imprevisto → Stop e test interrotto.
+    if (!allowed) { this.emergencyStop(`evento imprevisto ${evt.key} (${evt.text}), ${cls.origin === 'tool' ? 'causato dal tool' : 'esterno'} (A18)`); return; }
+    if (cls.origin === 'external' && (evt.key === '02 01' || evt.key === '02 02')) this._endPhase();
+    if (cls.origin === 'external' && evt.key === '04') this._startPhase();
+  }
+  _onTraining(b) {
+    const s = Ftms.decodeTraining(b); this.lastTraining = { ...s, t: this.env.now(), bytes: b };
+    this.log.add('STATO', { ch: '2AD3', bytes: b, text: `Training Status: ${s.name}` });
+    this._emit('training', this.lastTraining); this._emitState();
+  }
+  _onData(b) {
+    const t = this.env.now();
+    const d = Ftms.decodeTreadmill(b); d.t = t; this.lastData = d;
+    this.log.add('DATI', { ch: '2ACD', bytes: b, text: dataText(d) });
+    if (!d.ok || d.flags !== 0x01A4) {
+      const k = `${d.flags}/${b.length}`;
+      if (!this.flagsSeen.has(k)) { this.flagsSeen.add(k); this.log.add('ANOMALIA', { text: `Treadmill Data con flag ${d.flags == null ? '—' : h16(d.flags)} e ${b.length} byte; osservato finora: A4 01 e 14 byte (A34)` }); }
+    }
+    this._emit('data', d); this._emitState();
+    if (d.speedCenti != null && d.speedCenti > SAFETY.SPEED_CAP_CENTI && t - this.lastOverspeedT > SAFETY.OVERSPEED_DATA_REPEAT_MS) {
+      this.lastOverspeedT = t;
+      this.emergencyStop(`velocità nei dati ${kmh(d.speedCenti)} oltre il tetto di 10,0 km/h (A14)`);
+    }
+  }
+
+  /* ---------------- perdita del collegamento (regola 4, A19) ---------------- */
+  _onDisconnect() {
+    for (const k in this.subs) this.subs[k] = false;
+    if (this.pending) { const p = this.pending; this.pending = null; this.env.clearTimeout(p.timer); p.reject(new NotConnected('collegamento perso')); }
+    this._endPhase();
+    if (this.userDisconnect) { this.userDisconnect = false; this.link = 'disconnected'; this.log.add('SISTEMA', { text: 'scollegato su tua richiesta' }); this._emitState(); return; }
+    if (this.reconnecting) { this.link = 'reconnecting'; this.log.add('SICUREZZA', { text: 'collegamento perso di nuovo durante il ricollegamento' }); this._emitState(); return; }
+    this.link = 'lost'; this.manualStopRequired = true;
+    const msg = 'Il nastro continua alla velocità dell\'ultimo comando. Fermalo adesso con lo Stop della console o togliendo la chiave.';
+    this.log.add('SICUREZZA', { text: 'COLLEGAMENTO PERSO. ' + msg });
+    if (this.onAbortTest) this.onAbortTest('collegamento perso');
+    this.ui.alert('lost', msg);
+    this._emitState();
+    this._reconnectLoop();
+  }
+  async _reconnectLoop() {
+    this.reconnecting = true; this.link = 'reconnecting'; this._emitState();
+    try {
+      for (let i = 1; i <= SAFETY.RECONNECT_ATTEMPTS; i++) {
+        this.ui.alert('progress', `Ricollegamento: tentativo ${i} di ${SAFETY.RECONNECT_ATTEMPTS}`);
+        this.log.add('SISTEMA', { text: `ricollegamento: tentativo ${i} di ${SAFETY.RECONNECT_ATTEMPTS}` });
+        try { await this.t.connect(); }
+        catch (e) { this.log.add('ERRORE', { text: `tentativo ${i} non riuscito: ${e.message}` }); await this._delay(SAFETY.RECONNECT_INTERVAL_MS); continue; }
+        this.link = 'connected'; this.log.add('SISTEMA', { text: 'ricollegato' });
+        // 1) Stop subito, prima di riattivare le indicazioni: l'Handoff ha
+        //    visto lo Stop accettato appena dopo una riconnessione.
+        try { this._noteCmd(Ftms.stop(), ' (subito dopo il ricollegamento; risposta non visibile)'); await this._write(Ftms.stop(), true); }
+        catch (e) { this.log.add('ERRORE', { text: `Stop immediato non riuscito: ${e.message}` }); }
+        // 2) Le sottoscrizioni si sono azzerate: si riattivano tutte.
+        await this._subscribeAll();
+        // 3) Stop con risposta verificata.
+        try {
+          const r = await this.stop('ricollegamento (A19)');
+          this.ui.alert('recovered', `Ricollegato. Stop confermato dal tapis roulant (${hex(r.bytes)}). Guarda il nastro e conferma che è fermo.`);
+          return;
+        } catch (e) {
+          if (!this.t.connected) { await this._delay(SAFETY.RECONNECT_INTERVAL_MS); continue; }
+          return; // _requireManualStop già chiamato da stop()
+        }
+      }
+      this.link = 'disconnected';
+      this._requireManualStop(`Ricollegamento non riuscito dopo ${SAFETY.RECONNECT_ATTEMPTS} tentativi`);
+    } finally { this.reconnecting = false; this._emitState(); }
+  }
+}
+
+/* =========================================================================
+ * CONTESTO DEL TEST – quello che un test può fare. Ogni attesa è
+ * interrompibile; ogni comando passa dal controllore.
+ * ========================================================================= */
+class TestContext {
+  constructor(runner, run) { this.r = runner; this.run = run; this.ctl = runner.ctl; this.ui = runner.ui; this.env = runner.env; this.log = runner.log; this.prefix = ''; }
+  now() { return this.env.now(); }
+  _checkAbort() { if (this.run.aborted) throw new AbortTest(this.run.abortReason || 'interrotto'); }
+  _abortable(p, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      const h = { reject: (e) => { done(); reject(e); } };
+      const done = () => { this.run.abortables.delete(h); if (timer != null) this.env.clearTimeout(timer); };
+      if (timeoutMs) timer = this.env.setTimeout(() => { done(); this.ui.clearPrompt(); resolve({ choice: null, timedOut: true, t: this.env.now() }); }, timeoutMs);
+      this.run.abortables.add(h);
+      p.then((v) => { done(); resolve(v); }, (e) => { done(); reject(e); });
+    });
+  }
+  sleep(ms) {
+    this._checkAbort();
+    return new Promise((resolve, reject) => {
+      const h = { reject: (e) => { this.env.clearTimeout(timer); this.run.abortables.delete(h); reject(e); } };
+      const timer = this.env.setTimeout(() => { this.run.abortables.delete(h); resolve(); }, Math.max(0, ms));
+      this.run.abortables.add(h);
+    });
+  }
+  sleepUntil(t) { return this.sleep(t - this.now()); }
+  section(text) { this.prefix = text; this.ui.instruct(text); this.log.add('SISTEMA', { text: `— ${text}` }); }
+  instruct(text) { this.ui.instruct(text); }
+  async ask(spec) {
+    this._checkAbort();
+    const p = this.ui.ask(spec);
+    const res = await this._abortable(p, spec.timeoutMs);
+    const label = res.choice ? ((spec.choices.find((c) => c.id === res.choice) || {}).label || res.choice) : (res.timedOut ? 'nessuna risposta (tempo scaduto)' : 'annullata');
+    this.log.add('UTENTE', { text: `${spec.title}: ${label}${res.note ? ' · nota: ' + res.note : ''}` });
+    return res;
+  }
+  // A12: avviso sonoro e conto alla rovescia di 3 s prima di un cambio.
+  async warn(text) {
+    this.ui.instruct(text);
+    this.log.add('SISTEMA', { text: `avviso: ${text}` });
+    for (let s = SAFETY.WARN_LEAD_MS / 1000; s > 0; s--) { this.ui.countdown(s); this.ui.beep('count'); await this.sleep(1000); }
+    this.ui.countdown(null); this.ui.beep('go');
+  }
+  async countdown(seconds, label) {
+    let cancelled = false;
+    const cancelP = this.ui.ask({ id: 'countdown', title: label, text: 'Tocca Annulla per fermare il conto alla rovescia.', choices: [{ id: 'cancel', label: 'Annulla' }] });
+    cancelP.then((r) => { if (r && r.choice === 'cancel') cancelled = true; });
+    try {
+      for (let s = seconds; s > 0; s--) {
+        if (cancelled) throw new AbortTest('conto alla rovescia annullato');
+        this.ui.countdown(s); this.ui.beep('count'); await this.sleep(1000);
+      }
+      if (cancelled) throw new AbortTest('conto alla rovescia annullato');
+      this.ui.beep('go');
+    } finally { this.ui.countdown(null); this.ui.clearPrompt(); }
+  }
+  async confirmStopped(text) {
+    for (;;) {
+      const a = await this.ask({ id: 'confirm-stopped', title: 'Il nastro è fermo?', text: `${text} Conferma solo quando il nastro è fermo.`, choices: [{ id: 'stopped', label: 'Il nastro è fermo' }] });
+      if (a.choice === 'stopped') { this.ctl.confirmStoppedByUser(); return; }
+    }
+  }
+  check({ name, expected, actual, verdict, source = 'DATI', ref = '' }) {
+    const c = { name: this.prefix ? `${this.prefix} · ${name}` : name, expected: String(expected), actual: String(actual), verdict, source, ref, t: this.now() };
+    this.run.checks.push(c);
+    this.log.add('VERIFICA', { text: `[${source}] ${c.name}: atteso ${c.expected} · ottenuto ${c.actual} → ${verdict}${ref ? ' (' + ref + ')' : ''}` });
+    this.ui.update();
+    return c;
+  }
+  timing(metric, ms, source = 'DATI') { const m = (this.run.timings[metric] = this.run.timings[metric] || { source, values: [] }); m.values.push(ms); }
+  setPolicy(list) { this.ctl.policy = { allowExternal: new Set(list || []) }; this.log.add('SISTEMA', { text: list && list.length ? `eventi esterni attesi in questa fase: ${list.join(', ')}` : 'nessun evento esterno atteso' }); }
+  _wait(stream, pred, { since, timeout }) {
+    this._checkAbort();
+    const buf = stream === 'event' ? this.r.events : this.r.data;
+    const s = since == null ? this.now() : since;
+    const found = buf.find((x) => x.t >= s && pred(x));
+    if (found) return Promise.resolve(found);
+    return new Promise((resolve, reject) => {
+      const w = { stream, since: s, pred, resolve: (v) => { cleanup(); resolve(v); }, reject: (e) => { cleanup(); reject(e); } };
+      const timer = this.env.setTimeout(() => { cleanup(); resolve(null); }, timeout);
+      const cleanup = () => { this.env.clearTimeout(timer); this.r.waiters.delete(w); };
+      this.r.waiters.add(w);
+    });
+  }
+  waitEvent(pred, o) { return this._wait('event', pred, o); }
+  waitData(pred, o) { return this._wait('data', pred, o); }
+  eventsBetween(a, b) { return this.r.events.filter((e) => e.t >= a && e.t <= b); }
+  lastData() { return this.ctl.lastData; }
+  async read(key) { this._checkAbort(); return this.ctl.read(key); }
+  fail(reason) { this.ctl.emergencyStop(reason); throw new AbortTest(reason); }
+  async _cmd(label, fn) {
+    this._checkAbort();
+    try {
+      const r = await fn();
+      this.timing(`tempo di risposta ${label}`, r.rtt);
+      return r;
+    } catch (e) {
+      if (this.run.aborted || e instanceof AbortTest || e instanceof Superseded) throw new AbortTest(this.run.abortReason || e.message);
+      if (e instanceof CommandRejected) this.check({ name: `risposta a ${label}`, expected: 'successo (80 .. 01)', actual: hex(e.response.bytes), verdict: V.DIFF, ref: 'Addendum §3' });
+      if (e instanceof ResponseTimeout) this.check({ name: `risposta a ${label}`, expected: `entro ${SAFETY.RESPONSE_TIMEOUT_MS} ms`, actual: 'nessuna risposta', verdict: V.DIFF, ref: 'regola 4' });
+      // Regola 4: errore inatteso, risposta mancante o diversa → Stop automatico.
+      if (!label.startsWith('08 01')) this.ctl.emergencyStop(`${label}: ${e.message}`);
+      throw new AbortTest(`${label}: ${e.message}`);
+    }
+  }
+  get cmd() {
+    return {
+      requestControl: (o) => this._cmd('00 Request Control', () => this.ctl.requestControl(o)),
+      start: (o) => this._cmd('07 Start', () => this.ctl.start(o)),
+      setSpeed: (c, o) => this._cmd('02 Set Target Speed', () => this.ctl.setSpeed(c, o)),
+      stop: () => this._cmd('08 01 Stop', () => this.ctl.stop(`comando del test ${this.run.id}`)),
+      pause: () => this._cmd('08 02 Pausa', () => this.ctl.pause()),
+      reset: () => this._cmd('01 Reset', () => this.ctl.reset()),
+    };
+  }
+  // Regola 8: ripartenza dopo la chiave.
+  async restartAfterKeyGesture() {
+    if (this.ctl.keyState === 'removed') await this.cmd.stop();
+    const a = await this.ask({ id: 'restart-gesture', title: 'Ripartenza dopo la chiave', text: 'La chiave è stata tolta. Verifica: chiave inserita, nastro vuoto, mano vicino alla chiave. Dopo il tuo tocco parte un conto alla rovescia di 5 s, poi il nastro riparte.', choices: [{ id: 'go', label: 'Avvia il conto alla rovescia' }, { id: 'cancel', label: 'Annulla' }] });
+    if (a.choice !== 'go') throw new AbortTest('ripartenza dopo la chiave annullata');
+    await this.countdown(SAFETY.RESTART_COUNTDOWN_S, 'Ripartenza tra');
+    this.ctl.grantRestartAfterKey();
+  }
+}
+
+/* ------------------- sequenze riusate dai test -------------------------- */
+const originLabel = (cls) => (cls.origin === 'tool' ? 'causato dal tool' : 'esterno');
+async function startBelt(ctx, { warnText = 'Il nastro sta per partire' } = {}) {
+  const out = {};
+  out.rc = await ctx.cmd.requestControl();
+  if (ctx.ctl.keyState !== 'ok') await ctx.restartAfterKeyGesture(); else await ctx.warn(warnText);
+  out.st = await ctx.cmd.start();
+  out.t = out.st.cmd.tSend;
+  out.ev = await ctx.waitEvent((e) => e.evt.key === '04', { since: out.t, timeout: 2500 });
+  out.d = await ctx.waitData((p) => p.speedCenti > 0, { since: out.t, timeout: 4000 });
+  if (out.ev) ctx.timing('evento 04 dopo 07 Start', out.ev.t - out.t);
+  if (out.d) ctx.timing('dati: nastro in moto dopo 07 Start', out.d.t - out.t);
+  return out;
+}
+function checkStart(ctx, s, ref = 'Addendum §6') {
+  ctx.check({ name: 'risposta a 07 Start', expected: '80 07 01', actual: hex(s.st.bytes), verdict: V.OK, ref: 'Addendum §3' });
+  ctx.check({ name: 'evento 04 dopo lo Start', expected: '04 causato dal tool (riferimento 0,6–1,1 s)', actual: s.ev ? `04 ${originLabel(s.ev.cls)} dopo ${msTxt(s.ev.t - s.t)}` : 'nessun 04 entro 2,5 s', verdict: s.ev && s.ev.cls.origin === 'tool' ? V.OK : V.DIFF, ref: 'Addendum §4' });
+  ctx.check({ name: 'velocità di partenza nei dati', expected: kmh(100), actual: s.d ? kmh(s.d.speedCenti) : 'nastro non in moto nei dati entro 4 s', verdict: s.d && s.d.speedCenti === 100 ? V.OK : V.DIFF, ref });
+}
+async function setSpeedObserved(ctx, centi, { warn = true, eventTimeout = 2000, dataTimeout = 4000, check = true } = {}) {
+  if (warn) await ctx.warn(`Velocità a ${kmh(centi)} tra 3 s`);
+  const r = await ctx.cmd.setSpeed(centi);
+  const t = r.cmd.tSend;
+  const ev = await ctx.waitEvent((e) => e.evt.key === '05' && e.evt.centi === centi, { since: t, timeout: eventTimeout });
+  const d = await ctx.waitData((p) => p.speedCenti === centi, { since: t, timeout: dataTimeout });
+  if (ev) ctx.timing('evento 05 dopo 02 Set Target Speed', ev.t - t);
+  if (d) ctx.timing('dati: nuova velocità dopo 02 Set Target Speed', d.t - t);
+  if (check) {
+    ctx.check({ name: `risposta a ${kmh(centi)}`, expected: '80 02 01', actual: hex(r.bytes), verdict: V.OK, ref: 'Addendum §3' });
+    ctx.check({ name: `evento 05 a ${kmh(centi)}`, expected: '05 con lo stesso valore, causato dal tool (riferimento 0,7–0,8 s)', actual: ev ? `${originLabel(ev.cls)} dopo ${msTxt(ev.t - t)}` : `nessun evento entro ${eventTimeout / 1000} s`, verdict: ev && ev.cls.origin === 'tool' ? V.OK : V.DIFF, ref: 'Addendum §4' });
+    ctx.check({ name: `${kmh(centi)} nei dati`, expected: 'valore raggiunto (riferimento 1,2–2,0 s)', actual: d ? `dopo ${msTxt(d.t - t)}` : `non raggiunto entro ${dataTimeout / 1000} s`, verdict: d ? V.OK : V.DIFF, ref: 'Addendum §5' });
+  }
+  return { r, ev, d, t };
+}
+async function stopObserved(ctx, { expectEvent = true } = {}) {
+  ctx.ui.beep('tick'); // A12: prima di fermarsi solo un bip, nessun ritardo
+  const r = await ctx.cmd.stop();
+  const t = r.cmd.tSend;
+  const ev = await ctx.waitEvent((e) => e.evt.key === '02 01', { since: t, timeout: 2500 });
+  const d = await ctx.waitData((p) => p.speedCenti === 0, { since: t, timeout: 4000 });
+  if (ev) ctx.timing('evento 02 01 dopo 08 01 Stop', ev.t - t);
+  if (d) ctx.timing('dati: 0,0 km/h dopo 08 01 Stop', d.t - t);
+  ctx.check({ name: 'risposta a 08 01 Stop', expected: '80 08 01', actual: hex(r.bytes), verdict: V.OK, ref: 'Addendum §3' });
+  if (expectEvent) ctx.check({ name: 'evento 02 01 dopo lo Stop', expected: '02 01 causato dal tool (riferimento circa 1,1 s)', actual: ev ? `${originLabel(ev.cls)} dopo ${msTxt(ev.t - t)}` : 'nessun evento entro 2,5 s', verdict: ev && ev.cls.origin === 'tool' ? V.OK : V.DIFF, ref: 'Addendum §4' });
+  ctx.check({ name: '0,0 km/h nei dati dopo lo Stop', expected: 'valore raggiunto', actual: d ? `dopo ${msTxt(d.t - t)}` : 'non raggiunto entro 4 s', verdict: d ? V.OK : V.DIFF, ref: 'Addendum §5' });
+  return { r, ev, d, t };
+}
+const YES_NO = [{ id: 'yes', label: 'Sì' }, { id: 'no', label: 'No' }, { id: 'unknown', label: 'Non so' }];
+function choiceLabel(spec, res) { return res.choice ? ((spec.choices.find((c) => c.id === res.choice) || {}).label || res.choice) : 'nessuna risposta'; }
+async function observe(ctx, spec, expectedId, expectedText, ref) {
+  const res = await ctx.ask(spec);
+  const verdict = expectedId == null ? V.NC : res.choice === expectedId ? V.OK : (!res.choice || res.choice === 'unknown' || res.choice === 'other') ? V.NC : V.DIFF;
+  ctx.check({ name: spec.title, expected: expectedText, actual: choiceLabel(spec, res) + (res.note ? ` · nota: ${res.note}` : ''), verdict, source: 'OSSERVAZIONE', ref });
+  return res;
+}
+
+/* =========================================================================
+ * TEST T0–T9, dal più sicuro al più impegnativo (regola 6).
+ * maxCenti: velocità massima che il test invia (sempre ≤ 10,0 km/h).
+ * ========================================================================= */
+const TESTS = [
+  {
+    id: 'T0', title: 'Collegamento e lettura', motion: false, maxCenti: 0,
+    desc: 'Legge Device Information, Feature, intervallo di velocità, Body Sensor Location e Training Status; controlla notifiche e indicazioni. Invia solo Request Control (00), che non muove il nastro.',
+    async run(ctx) {
+      ctx.section('Device Information');
+      // A06: attesi = valori letti dalla mini pagina il 27/10 alle 16:36.
+      const dis = [['dis_manufacturer', 'EW. Inc', 'text'], ['dis_model', 'Domyos FTMS', 'text'], ['dis_fw', 'V1.5 21090702', 'text'], ['dis_sw', '1.0.0', 'text'], ['dis_sysid', '7A C2 0E 00 00 19 9E 68', 'hex']];
+      const info = {};
+      for (const [key, exp, kind] of dis) {
+        let actual, verdict;
+        try { const b = await ctx.read(key); actual = kind === 'text' ? textOf(b) : hex(b); verdict = actual === exp ? V.OK : V.DIFF; info[CH[key].name] = actual; }
+        catch (e) { if (e instanceof AbortTest) throw e; actual = `lettura non riuscita (${e.name})`; verdict = V.DIFF; }
+        ctx.check({ name: CH[key].name, expected: exp, actual, verdict, ref: 'mini pagina 27/10, A06' });
+      }
+      ctx.r.deviceInfo = info;
+
+      ctx.section('Fitness Machine');
+      try {
+        const b = await ctx.read('feature'); const f = Ftms.decodeFeature(b);
+        const expM = ['distanza totale', 'passo', 'energia consumata', 'misura del battito'], expT = ['velocità'];
+        ctx.check({ name: 'Fitness Machine Feature', expected: `macchina: ${expM.join(', ')}; target: ${expT.join(', ')}`, actual: f ? `${hex(b)} → macchina: ${f.machine.join(', ') || 'nessuna'}; target: ${f.targets.join(', ') || 'nessuno'}` : `${hex(b)} (lunghezza non valida)`, verdict: f && sameSet(f.machine, expM) && sameSet(f.targets, expT) ? V.OK : V.DIFF, ref: 'Handoff test 2, A48' });
+      } catch (e) { if (e instanceof AbortTest) throw e; ctx.check({ name: 'Fitness Machine Feature', expected: 'leggibile', actual: `${e.name}: ${e.message}`, verdict: V.DIFF }); }
+      try {
+        const b = await ctx.read('range'); const r = Ftms.decodeRange(b);
+        ctx.check({ name: 'Supported Speed Range', expected: '64 00 78 05 0A 00 (1,0–14,0 km/h, passo 0,1)', actual: `${hex(b)}${r ? ` → ${kmh(r.min)}–${kmh(r.max)}, passo ${kmh(r.inc)}` : ''}`, verdict: hex(b) === '64 00 78 05 0A 00' ? V.OK : V.DIFF, ref: 'Addendum §5' });
+      } catch (e) { if (e instanceof AbortTest) throw e; ctx.check({ name: 'Supported Speed Range', expected: 'leggibile', actual: `${e.name}: ${e.message}`, verdict: V.DIFF }); }
+      try {
+        const b = await ctx.read('bsl');
+        ctx.check({ name: 'Body Sensor Location', expected: 'nessun atteso nei documenti (solo registrazione)', actual: `${hex(b)} → ${BSL_NAMES[b[0]] || 'valore riservato'}`, verdict: V.NC, ref: 'Handoff passo 2' });
+      } catch (e) { if (e instanceof AbortTest) throw e; ctx.check({ name: 'Body Sensor Location', expected: 'leggibile', actual: `${e.name}: ${e.message}`, verdict: V.NC }); }
+      try {
+        const b = await ctx.read('training'); const s = Ftms.decodeTraining(b);
+        ctx.check({ name: 'Training Status a nastro fermo', expected: '01 01 Idle (solo indicativo: Addendum §2.7)', actual: `${hex(b)} → ${s.name}`, verdict: hex(b) === '01 01' ? V.OK : V.DIFF, ref: 'Handoff, A49' });
+      } catch (e) { if (e instanceof AbortTest) throw e; ctx.check({ name: 'Training Status', expected: 'leggibile', actual: `${e.name}: ${e.message}`, verdict: V.DIFF }); }
+
+      ctx.section('Notifiche e indicazioni');
+      for (const key of ['data', 'training', 'status', 'cp']) {
+        const what = key === 'cp' ? 'indicazioni' : 'notifiche';
+        ctx.check({ name: `${what} su ${h16(CH[key].chr)} ${CH[key].name}`, expected: 'attive', actual: ctx.ctl.subs[key] ? 'attive (descrittore 0x2902 scritto)' : 'NON attive', verdict: ctx.ctl.subs[key] ? V.OK : V.DIFF, ref: 'Addendum §8' });
+      }
+      const t0 = ctx.now();
+      const d = await ctx.waitData(() => true, { since: t0, timeout: 3000 });
+      ctx.check({ name: 'Treadmill Data ricevuti', expected: 'circa uno al secondo', actual: d ? `primo pacchetto dopo ${msTxt(d.t - t0)}` : 'nessun pacchetto in 3 s', verdict: d ? V.OK : V.DIFF, ref: 'Addendum §5' });
+      if (d) {
+        ctx.check({ name: 'formato Treadmill Data', expected: 'flag A4 01, 14 byte', actual: `flag ${h16(d.flags)}, ${d.len} byte`, verdict: d.flags === 0x01A4 && d.len === 14 && d.ok ? V.OK : V.DIFF, ref: 'Handoff, Addendum §5' });
+        ctx.check({ name: 'velocità nei dati a nastro fermo', expected: kmh(0), actual: kmh(d.speedCenti), verdict: d.speedCenti === 0 ? V.OK : V.DIFF, ref: 'Handoff' });
+      }
+      ctx.section('Verifica delle indicazioni');
+      if (ctx.ctl.subs.cp) {
+        const rc = await ctx.cmd.requestControl();
+        ctx.check({ name: 'Request Control (prova che le indicazioni arrivano)', expected: '80 00 01', actual: `${hex(rc.bytes)} dopo ${msTxt(rc.rtt)}`, verdict: V.OK, ref: 'Addendum §3, A50' });
+      } else ctx.check({ name: 'Request Control', expected: '80 00 01', actual: 'non inviato: indicazioni non attive', verdict: V.NC, ref: 'A50' });
+    },
+  },
+  {
+    id: 'T1', title: 'Comandi di base (3 ripetizioni)', motion: true, maxCenti: 200,
+    desc: 'Per tre volte: Request Control, Start, 2,0 km/h, Stop. Misura risposte, eventi e primo pacchetto di dati con la nuova velocità.',
+    async run(ctx) {
+      for (let rep = 1; rep <= 3; rep++) {
+        ctx.section(`Ripetizione ${rep} di 3`);
+        const s = await startBelt(ctx); checkStart(ctx, s);
+        await ctx.sleep(1500);
+        await setSpeedObserved(ctx, 200);
+        await ctx.sleep(2000);
+        await stopObserved(ctx);
+        if (rep < 3) await ctx.confirmStopped(`Fine ripetizione ${rep}.`);
+      }
+    },
+  },
+  {
+    id: 'T2', title: 'Ordine dei comandi', motion: true, maxCenti: 400,
+    desc: 'Parte A: 4,0 km/h a nastro fermo e poi Start (atteso: parte da 1,0 km/h). Parte B: Start e poi 4,0 km/h.',
+    async run(ctx) {
+      ctx.section('Parte A – velocità a nastro fermo, poi Start');
+      await ctx.cmd.requestControl();
+      await ctx.warn('Invio 4,0 km/h a nastro fermo tra 3 s');
+      // A21, A60: unica velocità inviata a nastro fermo; risposta non documentata.
+      const r = await ctx.cmd.setSpeed(400, { expected: [1, 2, 3, 4, 5] });
+      ctx.check({ name: 'risposta a 4,0 km/h a nastro fermo', expected: 'non documentata', actual: `${hex(r.bytes)} (${RESULT_NAMES[r.result] || r.result})`, verdict: V.NC, ref: 'A60' });
+      const ev = await ctx.waitEvent((e) => e.evt.key === '05', { since: r.cmd.tSend, timeout: 2000 });
+      ctx.check({ name: 'evento 05 a nastro fermo', expected: 'non documentato', actual: ev ? `05 ${kmh(ev.evt.centi)}, ${originLabel(ev.cls)}` : 'nessuno entro 2 s', verdict: V.NC, ref: 'A60' });
+      const dz = ctx.lastData();
+      ctx.check({ name: 'velocità nei dati dopo il comando a nastro fermo', expected: 'non documentata', actual: dz ? kmh(dz.speedCenti) : 'nessun dato', verdict: V.NC, ref: 'A60' });
+      const s = await startBelt(ctx, { warnText: 'Start tra 3 s: atteso 1,0 km/h, non 4,0' });
+      checkStart(ctx, s, 'Addendum §6 (osservazione a voce del 27/10)');
+      await observe(ctx, { id: 'T2-start-speed', title: 'A che velocità è partito il nastro?', choices: [{ id: 'slow', label: 'Lento, circa 1 km/h' }, { id: 'fast', label: 'Veloce, circa 4 km/h' }, { id: 'unknown', label: 'Non so' }] }, 'slow', 'lento, circa 1 km/h', 'Addendum §6');
+      await ctx.sleep(1000);
+      await stopObserved(ctx);
+      await ctx.confirmStopped('Fine parte A.');
+      ctx.section('Parte B – Start, poi velocità');
+      const s2 = await startBelt(ctx); checkStart(ctx, s2);
+      await ctx.sleep(1500);
+      await setSpeedObserved(ctx, 400);
+      await observe(ctx, { id: 'T2-reached', title: 'Il nastro è arrivato a circa 4 km/h?', choices: YES_NO }, 'yes', 'sì', 'Addendum §6');
+      await stopObserved(ctx);
+    },
+  },
+  {
+    id: 'T3', title: 'Rifiuto sotto il minimo', motion: true, maxCenti: 250,
+    desc: 'A 2,5 km/h invia 0,5 km/h (atteso 80 02 03, velocità invariata), poi 2,0 km/h per verificare che il controllo resti.',
+    async run(ctx) {
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1500);
+      await setSpeedObserved(ctx, 250);
+      await ctx.sleep(1000);
+      await ctx.warn('Invio 0,5 km/h tra 3 s: atteso rifiuto');
+      const r = await ctx.cmd.setSpeed(SAFETY.BELOW_MIN_TEST_CENTI, { allowBelowMin: true, expected: [1, 2, 3, 4, 5] });
+      const t = r.cmd.tSend;
+      ctx.check({ name: 'risposta a 0,5 km/h', expected: '80 02 03 (parametro non valido)', actual: `${hex(r.bytes)} (${RESULT_NAMES[r.result] || r.result})`, verdict: r.result === 3 ? V.OK : V.DIFF, ref: 'Handoff test 3' });
+      if (r.result !== 3) ctx.fail(`risposta inattesa a 0,5 km/h: ${hex(r.bytes)} (regola 4)`);
+      const ev = await ctx.waitEvent((e) => e.evt.key === '05', { since: t, timeout: 2000 });
+      ctx.check({ name: 'evento 05 dopo 0,5 km/h', expected: 'nessuno', actual: ev ? `05 ${kmh(ev.evt.centi)}` : 'nessuno entro 2 s', verdict: ev ? V.DIFF : V.OK, ref: 'Handoff test 3' });
+      await ctx.sleep(Math.max(0, t + 3200 - ctx.now()));
+      const pkts = ctx.r.data.filter((p) => p.t >= t);
+      const changed = pkts.filter((p) => p.speedCenti !== 250);
+      ctx.check({ name: 'velocità nei dati dopo 0,5 km/h', expected: '2,5 km/h invariata', actual: pkts.length ? (changed.length ? `cambiata: ${changed.map((p) => kmh(p.speedCenti)).join(', ')}` : `invariata in ${pkts.length} pacchetti`) : 'nessun pacchetto', verdict: !pkts.length ? V.NC : changed.length ? V.DIFF : V.OK, ref: 'Handoff test 3' });
+      const r2 = await setSpeedObserved(ctx, 200);
+      ctx.check({ name: 'controllo mantenuto dopo il rifiuto', expected: '2,0 km/h accettato (80 02 01)', actual: hex(r2.r.bytes), verdict: V.OK, ref: 'Handoff test 3' });
+      await observe(ctx, { id: 'T3-changed', title: 'Quando è partito 0,5 km/h il nastro ha cambiato velocità?', choices: YES_NO }, 'no', 'no', 'Handoff test 3');
+      await stopObserved(ctx);
+    },
+  },
+  {
+    id: 'T4', title: 'Rampe 6,0 → 10,0 → 6,0 km/h', motion: true, maxCenti: 1000,
+    desc: 'Tre profili, ognuno con il suo Start e Stop: 0,5 km/h ogni 2 s, 1,0 km/h ogni 2 s, 1,0 km/h ogni secondo. Ogni profilo resta sotto i 60 s.',
+    async run(ctx) {
+      const profiles = [
+        { name: '0,5 km/h ogni 2 s', step: 50, interval: 2000 },
+        { name: '1,0 km/h ogni 2 s', step: 100, interval: 2000 },
+        { name: '1,0 km/h ogni secondo', step: 100, interval: 1000 },
+      ];
+      for (let i = 0; i < profiles.length; i++) {
+        const p = profiles[i];
+        ctx.section(`Profilo ${i + 1} di 3: ${p.name}`);
+        const up = [], down = [];
+        for (let v = 600 + p.step; v <= SAFETY.SPEED_CAP_CENTI; v += p.step) up.push(v);
+        for (let v = 1000 - p.step; v >= 600; v -= p.step) down.push(v);
+        const s = await startBelt(ctx); checkStart(ctx, s);
+        await ctx.sleep(1000);
+        const base = await setSpeedObserved(ctx, 600, { dataTimeout: 5000 });
+        if (!base.d) {
+          ctx.check({ name: 'rampa', expected: 'eseguita da 6,0 km/h', actual: 'profilo saltato: 6,0 km/h non raggiunta nei dati', verdict: V.NC, ref: 'A42' });
+        } else {
+          await ctx.warn(`Rampa ${p.name}: si parte tra 3 s`);
+          const sent = [];
+          const runSeq = async (seq, finalCenti, label) => {
+            let next = ctx.now();
+            for (const v of seq) {
+              await ctx.sleepUntil(next);
+              ctx.ui.beep('tick');
+              const r = await ctx.cmd.setSpeed(v);
+              sent.push({ centi: v, id: r.cmd.id, t: r.cmd.tSend });
+              next = r.cmd.tSend + p.interval;
+            }
+            const tLast = sent[sent.length - 1].t;
+            const d = await ctx.waitData((x) => x.speedCenti === finalCenti, { since: tLast, timeout: 3000 });
+            ctx.check({ name: `${kmh(finalCenti)} nei dati a fine ${label}`, expected: 'valore raggiunto', actual: d ? `dopo ${msTxt(d.t - tLast)} dall'ultimo comando` : 'non raggiunto entro 3 s', verdict: d ? V.OK : V.DIFF, ref: 'richiesta T4, A58' });
+            if (d) ctx.timing(`dati: valore finale dopo l'ultimo comando (${p.name})`, d.t - tLast);
+          };
+          await runSeq(up, 1000, 'salita');
+          await runSeq(down, 600, 'discesa');
+          await ctx.sleep(Math.max(0, sent[sent.length - 1].t + SAFETY.CORRELATION_WINDOW_MS - ctx.now()));
+          const missing = [];
+          for (const x of sent) {
+            const e = ctx.r.events.find((ev) => ev.cls.cmdId === x.id);
+            if (e) ctx.timing('evento 05 dopo 02 (rampe)', e.t - x.t); else missing.push(x);
+          }
+          ctx.check({ name: `risposte ai ${sent.length} comandi`, expected: 'tutte 80 02 01', actual: `${sent.length} su ${sent.length} con successo`, verdict: V.OK, ref: 'Addendum §3' });
+          ctx.check({ name: 'eventi 05 correlati', expected: `${sent.length}, uno per comando`, actual: `${sent.length - missing.length}${missing.length ? '; mancanti: ' + missing.map((x) => kmh(x.centi)).join(', ') : ''}`, verdict: missing.length ? V.DIFF : V.OK, ref: 'Addendum §4' });
+        }
+        await stopObserved(ctx);
+        if (i < profiles.length - 1) await ctx.confirmStopped(`Fine profilo ${i + 1}.`);
+      }
+    },
+  },
+  {
+    id: 'T5', title: 'Salto singolo 2,0 → 8,0 km/h', motion: true, maxCenti: 800,
+    desc: 'Un solo comando da 2,0 a 8,0 km/h. Tocchi «Il nastro è a velocità» quando lo vedi stabile: si confronta con il momento in cui i dati segnano 8,0.',
+    async run(ctx) {
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1000);
+      await setSpeedObserved(ctx, 200);
+      await ctx.sleep(2000);
+      await ctx.warn('Salto a 8,0 km/h tra 3 s. Guarda il nastro.');
+      const spec = { id: 'T5-at-speed', title: 'Tocca quando il nastro è stabile a 8 km/h', text: 'Il comando è partito. Tocca appena vedi il nastro stabile alla nuova velocità.', choices: [{ id: 'at-speed', label: 'Il nastro è a velocità' }, { id: 'unsure', label: 'Non riesco a capirlo' }], timeoutMs: 12000 };
+      const askP = ctx.ask(spec); askP.catch(() => {});
+      const r = await ctx.cmd.setSpeed(800);
+      const t = r.cmd.tSend;
+      const ev = await ctx.waitEvent((e) => e.evt.key === '05' && e.evt.centi === 800, { since: t, timeout: 2000 });
+      const d = await ctx.waitData((p) => p.speedCenti === 800, { since: t, timeout: 4000 });
+      const ans = await askP;
+      ctx.check({ name: 'risposta a 8,0 km/h', expected: '80 02 01', actual: hex(r.bytes), verdict: V.OK, ref: 'Addendum §3' });
+      ctx.check({ name: 'evento 05 a 8,0 km/h', expected: '05 causato dal tool', actual: ev ? `${originLabel(ev.cls)} dopo ${msTxt(ev.t - t)}` : 'nessuno entro 2 s', verdict: ev && ev.cls.origin === 'tool' ? V.OK : V.DIFF, ref: 'Addendum §4' });
+      if (ev) ctx.timing('evento 05 dopo 02 Set Target Speed', ev.t - t);
+      const dt = d ? d.t - t : null;
+      if (d) ctx.timing('dati: 8,0 km/h dopo il salto', dt);
+      ctx.check({ name: '8,0 km/h nei dati', expected: 'entro 1,2–2,0 s', actual: d ? msTxt(dt) : 'non raggiunta entro 4 s', verdict: !d ? V.DIFF : (dt >= 1200 && dt <= 2000 ? V.OK : V.DIFF), ref: 'Addendum §5' });
+      if (ans.choice === 'at-speed') {
+        const bt = ans.t - t;
+        ctx.timing('nastro a velocità dopo il salto (a occhio)', bt, 'OSSERVAZIONE');
+        ctx.check({ name: 'nastro a velocità (a occhio)', expected: '2–3 s, tolleranza ±0,5 s per il tempo di reazione', actual: `${msTxt(bt)}${d ? `; differenza rispetto ai dati: ${bt - dt >= 0 ? '+' : ''}${msTxt(bt - dt)}` : ''}`, verdict: bt >= 1500 && bt <= 3500 ? V.OK : V.DIFF, source: 'OSSERVAZIONE', ref: 'Addendum §5, A44' });
+      } else ctx.check({ name: 'nastro a velocità (a occhio)', expected: '2–3 s', actual: choiceLabel(spec, ans), verdict: V.NC, source: 'OSSERVAZIONE', ref: 'Addendum §5' });
+      await ctx.sleep(2000);
+      await stopObserved(ctx);
+    },
+  },
+  {
+    id: 'T6', title: 'Pausa e ripresa', motion: true, maxCenti: 200,
+    desc: 'A 2,0 km/h: Pausa (08 02), attesa, ripresa (07). Atteso evento 02 02 e ripartenza da 1,0 km/h.',
+    async run(ctx) {
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1000);
+      await setSpeedObserved(ctx, 200);
+      await ctx.sleep(3000);
+      const before = ctx.lastData();
+      ctx.ui.beep('tick');
+      const r = await ctx.cmd.pause();
+      const t = r.cmd.tSend;
+      ctx.check({ name: 'risposta a 08 02 Pausa', expected: '80 08 01', actual: hex(r.bytes), verdict: V.OK, ref: 'Handoff test 3' });
+      const ev = await ctx.waitEvent((e) => e.evt.code === 0x02, { since: t, timeout: 2500 });
+      ctx.check({ name: 'evento dopo la Pausa', expected: '02 02 (ipotesi da standard FTMS)', actual: ev ? `${ev.evt.key}, ${originLabel(ev.cls)}, dopo ${msTxt(ev.t - t)}` : 'nessun evento entro 2,5 s', verdict: !ev ? V.NC : ev.evt.key === '02 02' ? V.OK : V.DIFF, ref: 'A31' });
+      if (ev) ctx.timing('evento 02 xx dopo 08 02 Pausa', ev.t - t);
+      const dz = await ctx.waitData((p) => p.speedCenti === 0, { since: t, timeout: 4000 });
+      ctx.check({ name: 'velocità nei dati durante la Pausa', expected: 'non documentata', actual: dz ? `0,0 km/h dopo ${msTxt(dz.t - t)}` : `non a 0 entro 4 s (${kmh(ctx.lastData() && ctx.lastData().speedCenti)})`, verdict: V.NC, ref: 'A31' });
+      await observe(ctx, { id: 'T6-stopped', title: 'Il nastro si è fermato?', choices: YES_NO }, 'yes', 'sì, in meno di un secondo', 'Handoff test 3');
+      await ctx.sleep(1500);
+      const after = ctx.lastData();
+      const sum = (x) => (x ? (x.energy || 0) + (x.distance || 0) : 0);
+      ctx.check({ name: 'contatori dopo la Pausa', expected: 'conservati', actual: `prima: ${before ? before.energy : '—'} kcal, ${before ? before.distance : '—'} m · dopo: ${after ? after.energy : '—'} kcal, ${after ? after.distance : '—'} m`, verdict: sum(before) === 0 ? V.NC : (after && after.energy >= before.energy && after.distance >= before.distance ? V.OK : V.DIFF), ref: 'Handoff, contatori' });
+      ctx.section('Ripresa');
+      const s2 = await startBelt(ctx, { warnText: 'Ripresa (07) tra 3 s' });
+      checkStart(ctx, s2, 'Handoff (dopo una Pausa riparte da 1,0 km/h)');
+      await observe(ctx, { id: 'T6-resume-speed', title: 'A che velocità è ripartito?', choices: [{ id: 'slow', label: 'Lento, circa 1 km/h' }, { id: 'prev', label: 'Come prima, circa 2 km/h' }, { id: 'unknown', label: 'Non so' }] }, 'slow', 'lento, circa 1 km/h', 'Handoff');
+      await ctx.sleep(1000);
+      await stopObserved(ctx);
+    },
+  },
+  {
+    id: 'T7', title: 'Eventi dalla console', motion: true, maxCenti: 100,
+    desc: 'Il tool avvia il nastro a 1,0 km/h e poi non invia comandi: tu cambi velocità dai tasti (restando sotto 5 km/h) e premi Stop sulla console.',
+    async run(ctx) {
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1000);
+      ctx.setPolicy(['05', '02 01']);
+      const t0 = ctx.now();
+      const spec = { id: 'T7-console', title: 'Ora usa solo la console', text: 'Con i tasti della console aumenta la velocità di qualche passo, restando sotto 5 km/h, poi premi Stop sulla console. Il telefono non invia comandi. Hai 45 s. Tocca «Fatto» quando il nastro è fermo.', choices: [{ id: 'done', label: 'Fatto, il nastro è fermo' }, { id: 'fail', label: 'Non ci sono riuscito' }], timeoutMs: 45000 };
+      const a = await ctx.ask(spec);
+      const t1 = ctx.now();
+      ctx.setPolicy(null);
+      const evs = ctx.eventsBetween(t0, t1);
+      const ext05 = evs.filter((e) => e.evt.key === '05' && e.cls.origin === 'external');
+      const ext0201 = evs.filter((e) => e.evt.key === '02 01' && e.cls.origin === 'external');
+      const tx = ctx.ctl.history.filter((c) => c.tSend >= t0 && c.tSend <= t1);
+      const nc = a.choice !== 'done';
+      ctx.check({ name: 'comandi del telefono durante la prova', expected: 'nessuno', actual: tx.length ? tx.map((c) => c.label).join(', ') : 'nessuno', verdict: tx.length ? V.DIFF : V.OK, ref: 'richiesta T7' });
+      ctx.check({ name: 'eventi 05 esterni', expected: 'almeno uno, non correlato ai comandi del tool', actual: ext05.length ? ext05.map((e) => kmh(e.evt.centi)).join(', ') : 'nessuno', verdict: ext05.length ? V.OK : nc ? V.NC : V.DIFF, ref: 'Addendum §4' });
+      ctx.check({ name: 'evento 02 01 esterno (Stop della console)', expected: 'uno', actual: ext0201.length ? `${ext0201.length}` : 'nessuno', verdict: ext0201.length ? V.OK : nc ? V.NC : V.DIFF, ref: 'Addendum §4' });
+      const pk = ctx.r.data.filter((p) => p.t >= t0 && p.t <= t1 && p.speedCenti != null);
+      const maxV = pk.reduce((m, p) => Math.max(m, p.speedCenti), 0);
+      ctx.check({ name: 'variazioni della console nei dati', expected: 'visibili in Treadmill Data', actual: pk.length ? `massimo ${kmh(maxV)}` : 'nessun dato', verdict: maxV > 100 ? V.OK : nc ? V.NC : V.DIFF, ref: 'Handoff' });
+      const tool = evs.filter((e) => e.cls.origin === 'tool');
+      ctx.check({ name: 'eventi attribuiti al tool durante la prova', expected: 'nessuno', actual: tool.length ? tool.map((e) => e.evt.key).join(', ') : 'nessuno', verdict: tool.length ? V.DIFF : V.OK, ref: 'A30' });
+    },
+  },
+  {
+    id: 'T8', title: 'Chiave di sicurezza', motion: true, maxCenti: 200,
+    desc: 'A 2,0 km/h togli la chiave: atteso evento 03 e dati a 0,0 in meno di 1 s; il tool invia subito Stop (A15). Rimetti la chiave, 10 s senza comandi, poi Stop e Start con il tuo gesto e conto alla rovescia: attesa ripartenza da 1,0 km/h.',
+    async run(ctx) {
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1000);
+      await setSpeedObserved(ctx, 200);
+      await ctx.sleep(2000);
+      ctx.section('Chiave tolta');
+      ctx.setPolicy(['03']);
+      const tAsk = ctx.now();
+      const evP = ctx.waitEvent((e) => e.evt.key === '03', { since: tAsk, timeout: 25000 }); evP.catch(() => {});
+      await ctx.ask({ id: 'T8-remove-key', title: 'Togli la chiave adesso', text: 'Il nastro è a 2,0 km/h. Togli la chiave di sicurezza, poi tocca il pulsante.', choices: [{ id: 'removed', label: 'Ho tolto la chiave' }, { id: 'fail', label: 'Non riesco' }], timeoutMs: 25000 });
+      const ev = await evP;
+      ctx.setPolicy(null);
+      if (!ev) { ctx.check({ name: 'evento 03', expected: '03 alla rimozione della chiave', actual: 'nessun evento entro 25 s', verdict: V.DIFF, ref: 'Addendum §4' }); return; }
+      ctx.check({ name: 'evento 03', expected: '03, esterno', actual: `03 dopo ${msTxt(ev.t - tAsk)} dalla richiesta`, verdict: V.OK, ref: 'Addendum §4' });
+      const dz = await ctx.waitData((p) => p.speedCenti === 0, { since: ev.t, timeout: 2000 });
+      if (dz) ctx.timing('dati: 0,0 km/h dopo evento 03', dz.t - ev.t);
+      ctx.check({ name: '0,0 km/h nei dati dopo 03', expected: 'meno di 1 s', actual: dz ? msTxt(dz.t - ev.t) : 'non a 0 entro 2 s', verdict: dz && dz.t - ev.t < 1000 ? V.OK : V.DIFF, ref: 'Addendum §4' });
+      const as = ctx.ctl.lastAutoStop && ctx.ctl.lastAutoStop.t >= ev.t ? await ctx.ctl.lastAutoStop.done : null;
+      ctx.check({ name: 'Stop automatico dopo 03', expected: '80 08 01 (ipotesi)', actual: as && as.ok ? hex(as.r.bytes) : 'non confermato', verdict: as && as.ok ? V.OK : V.DIFF, ref: 'A15, A16' });
+      const e0201 = await ctx.waitEvent((e) => e.evt.key === '02 01', { since: ev.t, timeout: 2000 });
+      ctx.check({ name: 'evento 02 01 dopo lo Stop a chiave tolta', expected: 'nessuno (il nastro era già fermo dalla chiave)', actual: e0201 ? `02 01, ${originLabel(e0201.cls)}` : 'nessuno', verdict: e0201 ? V.DIFF : V.OK, ref: 'Addendum §4, A52' });
+      ctx.section('Chiave rimessa');
+      await ctx.ask({ id: 'T8-reinsert-key', title: 'Rimetti la chiave', text: 'Rimetti la chiave e tocca il pulsante. Poi non toccare nulla per 10 s: il telefono non invierà comandi.', choices: [{ id: 'inserted', label: 'Chiave rimessa' }] });
+      const tR = ctx.now();
+      ctx.instruct('Attesa di 10 s senza comandi…');
+      await ctx.sleep(10000);
+      const evs = ctx.eventsBetween(tR, ctx.now());
+      const tx = ctx.ctl.history.filter((c) => c.tSend >= tR);
+      ctx.check({ name: 'eventi nei 10 s dopo la chiave rimessa', expected: 'nessuno', actual: evs.length ? evs.map((e) => e.evt.key).join(', ') : 'nessuno', verdict: evs.length ? V.DIFF : V.OK, ref: 'Addendum §4; condizione diversa dal 27/10 per lo Stop già inviato (A15)' });
+      ctx.check({ name: 'comandi inviati nei 10 s', expected: 'nessuno', actual: tx.length ? tx.map((c) => c.label).join(', ') : 'nessuno', verdict: tx.length ? V.DIFF : V.OK, ref: 'richiesta T8' });
+      ctx.section('Stop e poi Start');
+      const so = await ctx.cmd.stop();
+      ctx.check({ name: 'Stop prima della ripartenza', expected: '80 08 01', actual: hex(so.bytes), verdict: V.OK, ref: 'regola 8' });
+      const s2 = await startBelt(ctx); // chiede il gesto e il conto alla rovescia (regola 8)
+      checkStart(ctx, s2, 'Addendum §6 (Stop e poi Start dopo la chiave)');
+      await observe(ctx, { id: 'T8-what', title: 'Cosa fa il nastro?', text: 'Scegli e, se serve, scrivi cosa vedi.', note: true, choices: [{ id: 'slow', label: 'Riparte lento, circa 1 km/h' }, { id: 'prev', label: 'Riparte veloce, circa 2 km/h' }, { id: 'none', label: 'Non riparte' }, { id: 'other', label: 'Altro (scrivi una nota)' }] }, 'slow', 'riparte lento, circa 1 km/h', 'Addendum §6');
+      await ctx.sleep(1000);
+      await stopObserved(ctx);
+    },
+  },
+  {
+    id: 'T9', title: 'Reset (facoltativo)', motion: true, maxCenti: 600,
+    desc: '15 s a 6,0 km/h per far salire i contatori, Pausa (che li conserva), tua conferma che il nastro è fermo, poi 01 Reset. Effetto da osservare.',
+    async run(ctx) {
+      const go = await ctx.ask({ id: 'T9-confirm-run', title: 'Eseguire il Reset?', text: 'L\'effetto del Reset non è documentato (A33). Il comando parte solo a nastro fermo e dopo la tua conferma.', choices: [{ id: 'go', label: 'Procedi' }, { id: 'cancel', label: 'Annulla' }] });
+      if (go.choice !== 'go') throw new AbortTest('annullato da te');
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1000);
+      await setSpeedObserved(ctx, 600, { dataTimeout: 5000 });
+      ctx.instruct('15 s a 6,0 km/h per far salire i contatori');
+      await ctx.sleep(15000);
+      ctx.ui.beep('tick');
+      const pr = await ctx.cmd.pause();
+      ctx.check({ name: 'risposta a 08 02 Pausa', expected: '80 08 01', actual: hex(pr.bytes), verdict: V.OK, ref: 'Handoff' });
+      await ctx.waitData((p) => p.speedCenti === 0, { since: pr.cmd.tSend, timeout: 4000 });
+      await ctx.confirmStopped('Pausa inviata. Il Reset parte solo a nastro fermo.');
+      await ctx.sleep(1500);
+      const before = ctx.lastData();
+      const nonZero = before && ((before.energy || 0) > 0 || (before.distance || 0) > 0);
+      ctx.check({ name: 'contatori prima del Reset', expected: 'non a zero', actual: before ? `energia ${before.energy} kcal, distanza ${before.distance} m` : 'nessun dato', verdict: nonZero ? V.OK : V.NC, ref: 'richiesta T9, A46' });
+      if (!nonZero) {
+        const c = await ctx.ask({ id: 'T9-zero-counters', title: 'Contatori a zero', text: 'Nei dati i contatori sono a zero: il Reset non potrà mostrare un azzeramento. Continuare comunque?', choices: [{ id: 'continue', label: 'Continua' }, { id: 'cancel', label: 'Annulla' }] });
+        if (c.choice !== 'continue') throw new AbortTest('annullato da te: contatori a zero');
+      }
+      ctx.setPolicy(['01', 'FF', '02 01', '02 02']);
+      ctx.ui.beep('warn');
+      const r = await ctx.cmd.reset();
+      ctx.check({ name: 'risposta a 01 Reset', expected: 'da osservare', actual: `${hex(r.bytes)} (${RESULT_NAMES[r.result] || r.result})`, verdict: V.NC, ref: 'A33' });
+      await ctx.sleep(5000);
+      const evs = ctx.eventsBetween(r.cmd.tSend, ctx.now());
+      ctx.check({ name: 'eventi dopo il Reset', expected: 'da osservare', actual: evs.length ? evs.map((e) => `${e.evt.key} (${originLabel(e.cls)})`).join(', ') : 'nessuno', verdict: V.NC, ref: 'A33' });
+      const after = ctx.lastData();
+      ctx.check({ name: 'contatori dopo il Reset', expected: 'da osservare', actual: after ? `energia ${after.energy} kcal, distanza ${after.distance} m${before ? (after.energy === 0 && after.distance === 0 ? ' (azzerati)' : ' (non azzerati)') : ''}` : 'nessun dato', verdict: V.NC, ref: 'A33' });
+      ctx.setPolicy(null);
+      const rc = await ctx.cmd.requestControl({ expected: [1, 2, 3, 4, 5] });
+      ctx.check({ name: 'Request Control dopo il Reset', expected: '80 00 01', actual: hex(rc.bytes), verdict: rc.result === 1 ? V.OK : V.DIFF, ref: 'A33' });
+      await observe(ctx, { id: 'T9-console', title: 'Cosa mostra la console dopo il Reset?', note: true, choices: [{ id: 'zero', label: 'Contatori azzerati' }, { id: 'same', label: 'Contatori invariati' }, { id: 'other', label: 'Altro (scrivi una nota)' }, { id: 'unknown', label: 'Non so' }] }, null, 'da osservare', 'A33');
+    },
+  },
+];
+
+/* =========================================================================
+ * ESECUTORE – un test alla volta, nell'ordine, sempre chiuso da Stop e
+ * conferma (regole 5 e 6).
+ * ========================================================================= */
+class Runner {
+  constructor({ env, ctl, log, ui }) {
+    Object.assign(this, { env, ctl, log, ui });
+    this.checklist = { empty: false, key: false, hand: false, nobody: false };
+    this.status = Object.fromEntries(TESTS.map((t) => [t.id, 'da fare']));
+    this.runs = []; this.notes = {}; this.cur = null; this.events = []; this.data = []; this.waiters = new Set();
+    this.deviceInfo = null; this.startedAt = env.now();
+    ctl.onAbortTest = (reason) => this.abort(reason);
+    ctl.on('event', (x) => this._push('event', x));
+    ctl.on('data', (d) => this._push('data', d));
+  }
+  _push(stream, item) {
+    const buf = stream === 'event' ? this.events : this.data;
+    buf.push(item); if (buf.length > 5000) buf.splice(0, buf.length - 5000);
+    for (const w of [...this.waiters]) if (w.stream === stream && item.t >= w.since && w.pred(item)) w.resolve(item);
+  }
+  checklistOk() { return Object.values(this.checklist).every(Boolean); }
+  canRun(id) {
+    const no = (why) => ({ ok: false, why });
+    const idx = TESTS.findIndex((t) => t.id === id); const def = TESTS[idx];
+    if (!def) return no('test sconosciuto');
+    if (this.cur) return no(`${this.cur.id} è in corso: mai due test insieme (regola 5)`);
+    if (!this.checklistOk()) return no('completa la lista di controllo (regola 2)');
+    if (this.ctl.link !== 'connected') return no('tapis roulant non collegato');
+    if (this.ctl.manualStopRequired) return no('conferma prima che il nastro è fermo');
+    if (!this.ui.wakeLockActive()) return no('schermo sempre acceso non attivo (A05)');
+    if (def.motion && !this.ctl.allSubscribed()) return no('notifiche o indicazioni non attive: ricollega');
+    for (let i = 0; i < idx; i++) if (this.status[TESTS[i].id] === 'da fare') return no(`prima esegui o salta ${TESTS[i].id} (regola 6)`);
+    return { ok: true };
+  }
+  canSkip(id) {
+    const idx = TESTS.findIndex((t) => t.id === id);
+    if (this.cur || idx < 0 || this.status[id] !== 'da fare') return false;
+    for (let i = 0; i < idx; i++) if (this.status[TESTS[i].id] === 'da fare') return false;
+    return true;
+  }
+  skip(id) { if (!this.canSkip(id)) return false; this.status[id] = 'saltato'; this.log.add('UTENTE', { text: `${id} saltato` }); this.ui.update(); return true; }
+  abort(reason) {
+    const r = this.cur;
+    if (!r || r.closing || r.aborted) return;
+    r.aborted = true; r.abortReason = reason;
+    this.log.add('SICUREZZA', { text: `${r.id} interrotto: ${reason}` });
+    for (const h of [...r.abortables]) h.reject(new AbortTest(reason));
+    for (const w of [...this.waiters]) w.reject(new AbortTest(reason));
+    this.ui.clearPrompt(); this.ui.countdown(null); this.ui.update();
+  }
+  async run(id) {
+    const chk = this.canRun(id);
+    if (!chk.ok) throw new SafetyError(chk.why);
+    const def = TESTS.find((t) => t.id === id);
+    const attempt = this.runs.filter((r) => r.id === id).length + 1;
+    const run = { id, title: def.title, attempt, status: 'in corso', checks: [], timings: {}, tStart: this.env.now(), tEnd: null, abortReason: null, aborted: false, closing: false, abortables: new Set() };
+    this.runs.push(run); this.cur = run; this.status[id] = 'in corso';
+    this.ctl.activeTestId = id; this.ctl.policy = defaultPolicy(); this.log.testId = id;
+    this.log.add('SISTEMA', { text: `inizio ${id} ${def.title} (tentativo ${attempt}, velocità massima ${kmh(def.maxCenti)})` });
+    this.ui.update();
+    let outcome = 'completato';
+    try { await def.run(new TestContext(this, run)); }
+    catch (e) {
+      outcome = 'interrotto';
+      if (!run.abortReason) run.abortReason = (e && e.message) || String(e);
+      if (!(e instanceof AbortTest) && !run.aborted) {
+        // Regola 4: un errore inatteso del tool ferma il nastro.
+        this.log.add('ERRORE', { text: `errore inatteso in ${id}: ${e && e.stack ? e.stack.split('\n')[0] : e}` });
+        this.ctl.emergencyStop(`errore inatteso nel test: ${e.message}`, { abortTest: false });
+      }
+    } finally {
+      this.ctl.policy = defaultPolicy();
+      run.closing = true;
+      if (def.motion) await this._closeMotionTest();
+      this.ctl.activeTestId = null;
+      run.status = outcome; run.tEnd = this.env.now(); this.status[id] = outcome;
+      this.log.add('SISTEMA', { text: `fine ${id}: ${outcome}${run.abortReason ? ' – ' + run.abortReason : ''}` });
+      this.log.testId = ''; this.cur = null; this.ui.instruct(''); this.ui.countdown(null); this.ui.update();
+    }
+    return run;
+  }
+  // Regola 5: ogni test di movimento finisce con uno Stop e la tua conferma.
+  async _closeMotionTest() {
+    if (this.ctl.emergencyInProgress) { try { await this.ctl.emergencyInProgress; } catch (_) { /* già registrato */ } }
+    if (this.ctl.link === 'connected' && this.ctl.t.connected) {
+      try { await this.ctl.stop('chiusura del test (regola 5)'); } catch (e) { this.log.add('ERRORE', { text: `Stop di chiusura non riuscito: ${e.message}` }); }
+    }
+    for (;;) {
+      const a = await this.ui.ask({ id: 'confirm-stopped', title: 'Il nastro è fermo?', text: this.ctl.link === 'connected' ? 'Test chiuso con Stop. Guarda il nastro e conferma solo quando è fermo.' : 'Collegamento assente: ferma il nastro con lo Stop della console o togliendo la chiave, poi conferma.', choices: [{ id: 'stopped', label: 'Il nastro è fermo' }] });
+      if (a && a.choice === 'stopped') break;
+    }
+    this.ctl.confirmStoppedByUser();
+  }
+}
+
+/* =========================================================================
+ * REPORT – separa sempre [DATI] da [OSSERVAZIONE].
+ * ========================================================================= */
+function stats(values) { const n = values.length; if (!n) return null; const min = Math.min(...values), max = Math.max(...values); const avg = values.reduce((a, b) => a + b, 0) / n; return { n, min, avg, max }; }
+function buildReport(runner) {
+  const { ctl, log, env } = runner;
+  const L = [];
+  const rule = (c = '=') => L.push(c.repeat(64));
+  L.push('RAPPORTO DI PROVA – Domyos Run100E (FTMS)');
+  L.push(`Tool v${TOOL_VERSION} · assunzioni ${ASSUMPTIONS_VERSION}`);
+  L.push(`Sessione: ${dateTime(runner.startedAt)} → ${dateTime(env.now())}`);
+  L.push(`Dispositivo: ${ctl.deviceName || '—'}`);
+  if (runner.deviceInfo) for (const [k, v] of Object.entries(runner.deviceInfo)) L.push(`  ${k}: ${v}`);
+  L.push('');
+  L.push('LEGENDA');
+  L.push('  [DATI]          misurato dal tool sui pacchetti Bluetooth (risposte, eventi, Treadmill Data)');
+  L.push('  [OSSERVAZIONE]  riferito da te con un pulsante o una nota: non è una misura del tool');
+  L.push(`  Esiti: ${V.OK} · ${V.DIFF} · ${V.NC}`);
+  L.push('  Attesi: Addendum 27/10 (prevale), Handoff 25/10, mini pagina 27/10. Ipotesi e scelte: codici Axx in ASSUNZIONI.md.');
+  L.push(`  Correlazione: ${CORRELATION_RULE}`);
+  L.push('  La velocità nei dati è il valore impostato, non una misura del nastro (Addendum §2).');
+  L.push('');
+  rule(); L.push('1. RIEPILOGO'); rule();
+  L.push(`${'Test'.padEnd(5)}${'Stato'.padEnd(13)}${'OK'.padStart(4)}${'Div.'.padStart(6)}${'N.c.'.padStart(6)}  Titolo`);
+  for (const t of TESTS) {
+    const runs = runner.runs.filter((r) => r.id === t.id);
+    const cnt = (v) => runs.reduce((a, r) => a + r.checks.filter((c) => c.verdict === v).length, 0);
+    L.push(`${t.id.padEnd(5)}${runner.status[t.id].padEnd(13)}${String(cnt(V.OK)).padStart(4)}${String(cnt(V.DIFF)).padStart(6)}${String(cnt(V.NC)).padStart(6)}  ${t.title}${runs.length > 1 ? ` (${runs.length} tentativi)` : ''}`);
+  }
+  L.push('');
+  rule(); L.push('2. DETTAGLIO DELLE VERIFICHE'); rule();
+  for (const r of runner.runs) {
+    L.push('');
+    L.push(`${r.id} – ${r.title} · tentativo ${r.attempt} · ${r.status} · ${clock(r.tStart)}–${r.tEnd ? clock(r.tEnd) : '…'}`);
+    if (r.abortReason) L.push(`  Motivo dell'interruzione: ${r.abortReason}`);
+    for (const src of ['DATI', 'OSSERVAZIONE']) {
+      const cs = r.checks.filter((c) => c.source === src);
+      if (!cs.length) continue;
+      for (const c of cs) {
+        L.push(`  [${src}] ${c.name}`);
+        L.push(`        atteso:   ${c.expected}`);
+        L.push(`        ottenuto: ${c.actual}`);
+        L.push(`        esito:    ${c.verdict}${c.ref ? '  (' + c.ref + ')' : ''}`);
+      }
+    }
+    if (!r.checks.length) L.push('  Nessuna verifica registrata.');
+  }
+  L.push('');
+  rule(); L.push('3. TEMPI (ms) – minimo / medio / massimo'); rule();
+  const agg = {};
+  for (const r of runner.runs) for (const [m, x] of Object.entries(r.timings)) { const a = (agg[m] = agg[m] || { source: x.source, values: [] }); a.values.push(...x.values); }
+  const names = Object.keys(agg).sort();
+  if (!names.length) L.push('Nessun tempo misurato.');
+  for (const m of names) {
+    const s = stats(agg[m].values);
+    L.push(`[${agg[m].source}] ${m}`);
+    L.push(`        n=${s.n}  min ${Math.round(s.min)}  media ${Math.round(s.avg)}  max ${Math.round(s.max)}`);
+  }
+  L.push('  Riferimenti Addendum: risposte 48–88 ms; 04 a 0,6–1,1 s; 05 a 0,7–0,8 s; 02 01 a circa 1,1 s; dati 1,2–2,0 s.');
+  L.push('  I tempi di risposta sono misurati dalla chiamata di scrittura all\'indicazione (A35).');
+  L.push('');
+  rule(); L.push('4. ANOMALIE E INTERVENTI DI SICUREZZA [DATI]'); rule();
+  const an = log.entries.filter((e) => ['SICUREZZA', 'ANOMALIA', 'ERRORE'].includes(e.kind));
+  if (!an.length) L.push('Nessuno.');
+  for (const e of an) L.push(`${clock(e.t)} ${e.test || '--'} ${e.kind}: ${e.text}`);
+  L.push('');
+  rule(); L.push('5. OSSERVAZIONI SCRITTE DA TE [OSSERVAZIONE]'); rule();
+  const notes = Object.entries(runner.notes).filter(([, v]) => v && v.trim());
+  if (!notes.length) L.push('Nessuna.');
+  for (const [k, v] of notes) L.push(`${k}: ${v.trim()}`);
+  L.push('');
+  L.push('Report generato dal tool. Nessun dato è stato inventato: ogni [DATI] viene dal registro allegato.');
+  return L.join('\n');
+}
+
+root.RunCore = {
+  TOOL_VERSION, ASSUMPTIONS_VERSION, SAFETY, V, CH, SERVICES, NAME_FILTERS, TESTS, CORRELATION_RULE,
+  Ftms, Logger, Correlator, SafetyController, Runner, TestContext, buildReport,
+  SafetyError, AbortTest, NotConnected, hex, kmh, clock, dateTime, msTxt, h16,
+};
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+
+<script id="ui">
+/* =========================================================================
+ * INTERFACCIA (telefono) e trasporto Web Bluetooth.
+ * ========================================================================= */
+(function () {
+'use strict';
+const C = window.RunCore;
+const { SAFETY, V, TESTS, CH, kmh, hex, clock } = C;
+const $ = (id) => document.getElementById(id);
+const env = { now: () => performance.timeOrigin + performance.now(), setTimeout: (f, ms) => window.setTimeout(f, ms), clearTimeout: (id) => window.clearTimeout(id) };
+const BLE_OK = window.isSecureContext && !!(navigator.bluetooth && navigator.bluetooth.requestDevice);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/* ---------------- trasporto Web Bluetooth ---------------- */
+class WebBleTransport {
+  constructor() { this.device = null; this.server = null; this.chars = new Map(); this.handlers = new Map(); this.listened = new WeakSet(); this.onDisconnect = null; }
+  get connected() { return !!(this.device && this.device.gatt.connected); }
+  get name() { return this.device ? this.device.name : ''; }
+  // Deve partire direttamente dal tocco: nessun await prima di requestDevice.
+  async choose() {
+    const dev = await navigator.bluetooth.requestDevice({ filters: C.NAME_FILTERS, optionalServices: C.SERVICES });
+    if (dev !== this.device) { dev.addEventListener('gattserverdisconnected', () => { this.chars.clear(); if (this.onDisconnect) this.onDisconnect(); }); }
+    this.device = dev;
+  }
+  async connect() {
+    if (!this.device) throw new Error('nessun dispositivo scelto');
+    this.chars.clear();
+    let timer;
+    this.server = await Promise.race([this.device.gatt.connect(), new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('collegamento: nessuna risposta in 10 s')), 10000); })]).finally(() => clearTimeout(timer));
+  }
+  async _char(key) {
+    const d = CH[key]; if (!d) throw new C.SafetyError(`caratteristica non in elenco: ${key}`);
+    if (this.chars.has(key)) return this.chars.get(key);
+    const s = await this.server.getPrimaryService(d.svc); const c = await s.getCharacteristic(d.chr);
+    this.chars.set(key, c); return c;
+  }
+  static bytes(dv) { return new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength)); }
+  async read(key) { const c = await this._char(key); return WebBleTransport.bytes(await c.readValue()); }
+  // Solo il Control Point è scrivibile. Qualunque altra chiave è rifiutata qui.
+  async write(key, bytes) {
+    if (key !== 'cp' || !CH[key].writable) throw new C.SafetyError(`scrittura vietata su ${key}`);
+    const c = await this._char('cp');
+    return c.writeValueWithResponse ? c.writeValueWithResponse(bytes) : c.writeValue(bytes);
+  }
+  async subscribe(key, handler) {
+    const c = await this._char(key);
+    this.handlers.set(key, handler);
+    if (!this.listened.has(c)) { c.addEventListener('characteristicvaluechanged', (ev) => { const h = this.handlers.get(key); if (h) h(WebBleTransport.bytes(ev.target.value)); }); this.listened.add(c); }
+    await c.startNotifications();
+  }
+  disconnect() { if (this.device && this.device.gatt.connected) this.device.gatt.disconnect(); }
+}
+
+/* ---------------- suoni e vibrazione ---------------- */
+const audio = {
+  ctx: null, alarmTimer: null,
+  init() { try { if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)(); if (this.ctx.state === 'suspended') this.ctx.resume(); } catch (_) { /* senza audio */ } },
+  tone(freq, ms, when = 0) {
+    if (!this.ctx) return;
+    try { const o = this.ctx.createOscillator(), g = this.ctx.createGain(); o.type = 'square'; o.frequency.value = freq; g.gain.value = 0.18; o.connect(g); g.connect(this.ctx.destination); const t = this.ctx.currentTime + when; o.start(t); o.stop(t + ms / 1000); } catch (_) { /* ignora */ }
+  },
+  beep(kind) {
+    switch (kind) {
+      case 'count': this.tone(740, 120); break;
+      case 'go': this.tone(1046, 380); break;
+      case 'tick': this.tone(660, 70); break;
+      case 'warn': this.tone(880, 150); this.tone(880, 150, 0.25); this.tone(880, 150, 0.5); break;
+      case 'alarm': this.tone(440, 250); this.tone(880, 250, 0.3); vib([250, 100, 250]); break;
+      default: this.tone(600, 100);
+    }
+  },
+  alarm(on) { clearInterval(this.alarmTimer); this.alarmTimer = null; if (on) { this.beep('alarm'); this.alarmTimer = setInterval(() => this.beep('alarm'), 800); } },
+};
+function vib(p) { try { if (navigator.vibrate) navigator.vibrate(p); } catch (_) { /* nessuna vibrazione */ } }
+
+/* ---------------- schermo sempre acceso (A05) ---------------- */
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if (!('wakeLock' in navigator)) { log.add('ERRORE', { text: 'Wake Lock non disponibile in questo browser' }); return; }
+    if (wakeLock && !wakeLock.released) return;
+    wakeLock = await navigator.wakeLock.request('screen');
+    log.add('SISTEMA', { text: 'schermo sempre acceso attivo (Wake Lock)' });
+    wakeLock.addEventListener('release', () => { log.add('SISTEMA', { text: 'Wake Lock rilasciato' }); render(); });
+  } catch (e) { log.add('ERRORE', { text: `Wake Lock non ottenuto: ${e.name}: ${e.message}` }); }
+  render();
+}
+
+/* ---------------- interfaccia per il nucleo ---------------- */
+let prompt = null;
+let selectedTest = null;
+const ui = {
+  ask(spec) {
+    return new Promise((resolve) => {
+      if (prompt) { const old = prompt; prompt = null; old.resolve({ choice: null, cancelled: true, t: env.now() }); }
+      prompt = { spec, resolve };
+      vib(60); renderPrompt(); render();
+    });
+  },
+  clearPrompt() { if (prompt) { const old = prompt; prompt = null; old.resolve({ choice: null, cancelled: true, t: env.now() }); } renderPrompt(); },
+  instruct(text) { $('instr').textContent = text || ''; },
+  countdown(n) { const el = $('countdown'); if (n == null) el.hidden = true; else { el.hidden = false; el.textContent = n; } },
+  beep(kind) { audio.beep(kind); },
+  alert(kind, text) {
+    const ov = $('overlay');
+    if (kind === 'clear') { audio.alarm(false); ov.hidden = true; return; }
+    if (kind === 'progress') { $('ovProgress').textContent = text; return; }
+    ov.hidden = false;
+    if (kind === 'lost') { $('ovTitle').textContent = 'COLLEGAMENTO PERSO'; $('ovText').textContent = text; $('ovProgress').textContent = ''; audio.alarm(true); ov.classList.add('blink'); }
+    if (kind === 'manual') { $('ovTitle').textContent = 'FERMA IL NASTRO A MANO'; $('ovText').textContent = text; audio.alarm(true); ov.classList.add('blink'); }
+    if (kind === 'recovered') { $('ovTitle').textContent = 'RICOLLEGATO'; $('ovText').textContent = text; $('ovProgress').textContent = ''; audio.alarm(false); ov.classList.remove('blink'); }
+  },
+  wakeLockActive() { return !!wakeLock && !wakeLock.released; },
+  update() { render(); },
+};
+
+const log = new C.Logger(env);
+const transport = new WebBleTransport();
+const ctl = new C.SafetyController({ env, transport, log, ui });
+const runner = new C.Runner({ env, ctl, log, ui });
+window.banco = { ctl, runner, log }; // per ispezione dalla console di Chrome
+
+/* ---------------- rendering ---------------- */
+let renderQueued = false;
+function render() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; renderNow(); }); }
+function pill(text, cls = '') { return `<span class="pill ${cls}">${esc(text)}</span>`; }
+function renderStatus() {
+  const L = { disconnected: ['Non collegato', 'warn'], connected: ['Collegato', 'ok'], lost: ['Collegamento perso', 'bad'], reconnecting: ['Ricollegamento…', 'bad'] }[ctl.link];
+  const subsOk = ctl.allSubscribed();
+  const key = { ok: ['Chiave: ok', 'ok'], removed: ['Chiave tolta', 'bad'], 'stopped-after-key': ['Dopo la chiave: serve il tuo gesto', 'warn'] }[ctl.keyState];
+  const ph = ctl.phase ? Math.floor((env.now() - ctl.phase.t0) / 1000) : null;
+  $('pills').innerHTML = [
+    pill(L[0], L[1]),
+    ctl.link === 'connected' ? pill(subsOk ? 'Notifiche attive' : 'Notifiche incomplete', subsOk ? 'ok' : 'bad') : '',
+    pill(ui.wakeLockActive() ? 'Schermo acceso' : 'Schermo non bloccato', ui.wakeLockActive() ? 'ok' : 'warn'),
+    pill(key[0], key[1]),
+    ph != null ? pill(`In moto ${ph} / ${SAFETY.PHASE_MAX_MS / 1000} s`, ph >= 50 ? 'bad' : 'warn') : '',
+    ctl.lastTraining ? pill(ctl.lastTraining.name) : '',
+  ].join('');
+  const d = ctl.lastData;
+  $('spd').textContent = d && d.speedCenti != null ? kmh(d.speedCenti) : '—';
+  const e = ctl.lastEvent;
+  $('lastevt').textContent = e ? `${clock(e.t)} · evento ${e.evt.key} ${e.evt.text} · ${e.cls.origin === 'tool' ? 'causato dal tool' : 'esterno'}` : 'Nessun evento';
+}
+function renderTests() {
+  $('tests').innerHTML = TESTS.map((t) => {
+    const st = runner.status[t.id];
+    const last = [...runner.runs].reverse().find((r) => r.id === t.id);
+    const n = (v) => (last ? last.checks.filter((c) => c.verdict === v).length : 0);
+    const can = runner.canRun(t.id);
+    const btns = [];
+    if (st === 'da fare') {
+      btns.push(`<button class="btn primary" data-act="run" data-id="${t.id}" ${can.ok ? '' : 'disabled'}>Esegui ${t.id}</button>`);
+      if (runner.canSkip(t.id)) btns.push(`<button class="btn" data-act="skip" data-id="${t.id}">Salta</button>`);
+    } else if (st !== 'in corso') btns.push(`<button class="btn" data-act="run" data-id="${t.id}" ${can.ok ? '' : 'disabled'}>Ripeti ${t.id}</button>`);
+    const showWhy = !can.ok && st === 'da fare' && runner.canSkip(t.id);
+    return `<li><div class="tid">${t.id}</div><div><div class="ttitle">${esc(t.title)}<span class="chip ${st.replace(' ', '-')}">${esc(st)}</span></div>
+      <div class="tmeta num">max ${t.maxCenti ? kmh(t.maxCenti) : 'fermo'}${last ? ` · OK ${n(V.OK)} · diverso ${n(V.DIFF)} · non concl. ${n(V.NC)}` : ''}</div></div>
+      ${btns.length ? `<div class="tact">${btns.join('')}</div>` : ''}${showWhy ? `<div class="why">${esc(can.why)}</div>` : ''}</li>`;
+  }).join('');
+}
+function renderPanel() {
+  const run = runner.cur;
+  const panel = $('panel');
+  if (run) {
+    const def = TESTS.find((t) => t.id === run.id);
+    panel.hidden = false; $('intro').hidden = true; $('live').hidden = false;
+    $('panelEyebrow').textContent = `${run.id} in corso · tentativo ${run.attempt}`;
+    $('panelTitle').textContent = def.title; $('panelDesc').textContent = def.desc;
+    $('checks').innerHTML = run.checks.slice(-10).reverse().map((c) => `<li><span class="src">${c.source}</span> ${esc(c.name)}<br><span class="${c.verdict === V.OK ? 'v-ok' : c.verdict === V.DIFF ? 'v-diff' : 'v-nc'}">${esc(c.verdict)}</span> · ${esc(c.actual)}</li>`).join('') || '<li>Nessuna verifica ancora.</li>';
+    $('btnAbort').disabled = run.closing;
+  } else if (selectedTest) {
+    const def = TESTS.find((t) => t.id === selectedTest);
+    panel.hidden = false; $('intro').hidden = false; $('live').hidden = true;
+    $('panelEyebrow').textContent = `${def.id} · velocità massima ${def.maxCenti ? kmh(def.maxCenti) : 'nastro fermo'}`;
+    $('panelTitle').textContent = def.title; $('panelDesc').textContent = def.desc;
+    const can = runner.canRun(def.id); $('btnBegin').disabled = !can.ok; $('btnBegin').textContent = can.ok ? `Avvia ${def.id}` : can.why;
+  } else panel.hidden = true;
+  $('feed').innerHTML = runner.events.slice(-6).reverse().map((e) => `<li><span class="badge ${e.cls.origin === 'tool' ? 'tool' : 'ext'}">${e.cls.origin === 'tool' ? 'TOOL' : 'ESTERNO'}</span><span>${clock(e.t)} · <b>${esc(e.evt.key)}</b> ${esc(e.evt.text)}</span><span class="rule">${esc(e.cls.rule)}${e.cls.note ? ' · ' + esc(e.cls.note) : ''}</span></li>`).join('') || '<li><span></span><span>Nessun evento.</span></li>';
+}
+function renderPrompt() {
+  const box = $('prompt');
+  if (!prompt) { box.innerHTML = ''; return; }
+  const s = prompt.spec;
+  box.innerHTML = `<div class="prompt" role="dialog" aria-label="${esc(s.title)}"><div class="ptitle">${esc(s.title)}</div>${s.text ? `<p>${esc(s.text)}</p>` : ''}
+    ${s.note ? '<textarea id="promptNote" placeholder="Nota (facoltativa)"></textarea>' : ''}
+    <div class="choices">${s.choices.map((c, i) => `<button class="btn ${i === 0 ? 'primary' : ''}" data-choice="${esc(c.id)}">${esc(c.label)}</button>`).join('')}</div></div>`;
+  if (!$('panel').hidden) box.scrollIntoView({ block: 'nearest' });
+}
+function renderNow() {
+  renderStatus(); renderTests(); renderPanel();
+  const busy = !!runner.cur;
+  for (const id of ['chk-empty', 'chk-key', 'chk-hand', 'chk-nobody']) $(id).disabled = busy;
+  $('btnConnect').disabled = !BLE_OK || busy || ctl.link === 'connected' || ctl.link === 'reconnecting';
+  $('btnConnect').textContent = !BLE_OK ? 'Web Bluetooth non disponibile qui (serve https e Chrome)' : transport.device ? (ctl.link === 'connected' ? 'Collegato' : 'Ricollega') : 'Collega il tapis roulant';
+  $('btnDisconnect').disabled = busy || ctl.link !== 'connected';
+  $('btnWake').disabled = ui.wakeLockActive();
+}
+
+/* ---------------- registro a schermo ---------------- */
+const logLines = [];
+let logQueued = false;
+log.listeners.add((e) => { if (e.kind === 'DATI' && !$('chkShowData').checked) return; logLines.push(log.line(e)); if (logLines.length > 400) logLines.splice(0, logLines.length - 400); if (!logQueued) { logQueued = true; requestAnimationFrame(() => { logQueued = false; const el = $('log'); const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 30; el.textContent = logLines.slice(-200).join('\n'); if (atEnd) el.scrollTop = el.scrollHeight; }); } });
+
+/* ---------------- esportazione ---------------- */
+function stamp() { const d = new Date(); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`; }
+function download(name, text, mime) {
+  const blob = new Blob(['﻿' + text], { type: mime });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  log.add('UTENTE', { text: `scaricato ${name}` });
+}
+async function copy(text, what) {
+  try { await navigator.clipboard.writeText(text); log.add('UTENTE', { text: `${what} copiato negli appunti` }); }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    ta.remove(); log.add(ok ? 'UTENTE' : 'ERRORE', { text: ok ? `${what} copiato negli appunti` : `copia di ${what} non riuscita: usa Scarica` });
+  }
+}
+const logHeader = () => `Banco prova Run100E v${C.TOOL_VERSION} – registro completo\nEsportato: ${C.dateTime(env.now())}\nDispositivo: ${ctl.deviceName || '—'}\nUA: ${navigator.userAgent}`;
+function report() { const t = C.buildReport(runner); $('reportText').textContent = t; return t; }
+
+/* ---------------- eventi dell'interfaccia ---------------- */
+const CHECK_MAP = { 'chk-empty': 'empty', 'chk-key': 'key', 'chk-hand': 'hand', 'chk-nobody': 'nobody' };
+for (const [id, k] of Object.entries(CHECK_MAP)) $(id).addEventListener('change', (ev) => { runner.checklist[k] = ev.target.checked; log.add('UTENTE', { text: `lista di controllo: ${ev.target.parentElement.textContent.trim()} = ${ev.target.checked ? 'sì' : 'no'}` }); render(); });
+
+$('btnConnect').addEventListener('click', async () => {
+  audio.init(); requestWakeLock();
+  try {
+    if (!transport.device) { log.add('UTENTE', { text: 'scelta del dispositivo' }); await transport.choose(); }
+    await ctl.connect();
+  } catch (e) { log.add('ERRORE', { text: `collegamento: ${e.name}: ${e.message}` }); }
+  render();
+});
+$('btnDisconnect').addEventListener('click', () => { try { ctl.disconnect(); } catch (e) { log.add('ERRORE', { text: e.message }); } render(); });
+$('btnWake').addEventListener('click', () => { audio.init(); requestWakeLock(); });
+$('tests').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-act]'); if (!b) return;
+  audio.init();
+  if (b.dataset.act === 'skip') runner.skip(b.dataset.id);
+  if (b.dataset.act === 'run') { selectedTest = b.dataset.id; render(); setTimeout(() => $('panel').scrollIntoView({ block: 'start', behavior: 'smooth' }), 50); }
+});
+$('btnBegin').addEventListener('click', () => {
+  const id = selectedTest; if (!id) return;
+  audio.init(); requestWakeLock();
+  selectedTest = null;
+  runner.run(id).catch((e) => log.add('ERRORE', { text: `${id} non avviato: ${e.message}` })).finally(render);
+  render();
+});
+$('btnCancelIntro').addEventListener('click', () => { selectedTest = null; render(); });
+$('prompt').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-choice]'); if (!b || !prompt) return;
+  const p = prompt; prompt = null;
+  const noteEl = $('promptNote');
+  p.resolve({ choice: b.dataset.choice, t: env.now(), note: noteEl ? noteEl.value.trim() : '' });
+  renderPrompt(); render();
+});
+// Regola 3: lo Stop funziona sempre, con o senza test in corso.
+$('btnStop').addEventListener('click', () => { audio.init(); log.add('UTENTE', { text: 'STOP premuto' }); ctl.userStop(); render(); });
+$('btnAbort').addEventListener('click', () => { log.add('UTENTE', { text: 'Interrompi test premuto' }); ctl.emergencyStop('test interrotto da te'); render(); });
+$('ovAck').addEventListener('click', () => { ctl.confirmStoppedByUser(); if (ctl.link === 'reconnecting') { $('overlay').hidden = false; $('ovTitle').textContent = 'RICOLLEGAMENTO IN CORSO'; audio.alarm(false); } render(); });
+$('btnReport').addEventListener('click', report);
+$('btnCopyReport').addEventListener('click', () => copy(report(), 'report'));
+$('btnSaveReport').addEventListener('click', () => download(`run100e-report-${stamp()}.txt`, report(), 'text/plain;charset=utf-8'));
+$('btnCopyLog').addEventListener('click', () => copy(log.toText(logHeader()), 'registro'));
+$('btnSaveLog').addEventListener('click', () => download(`run100e-registro-${stamp()}.txt`, log.toText(logHeader()), 'text/plain;charset=utf-8'));
+$('btnSaveCsv').addEventListener('click', () => download(`run100e-registro-${stamp()}.csv`, log.toCSV(), 'text/csv;charset=utf-8'));
+$('chkShowData').addEventListener('change', () => { logLines.length = 0; for (const e of log.entries) if (e.kind !== 'DATI' || $('chkShowData').checked) logLines.push(log.line(e)); $('log').textContent = logLines.slice(-200).join('\n'); });
+
+// A05: pagina nascosta → Stop; al ritorno si richiede di nuovo il Wake Lock.
+document.addEventListener('visibilitychange', () => { if (document.hidden) ctl.onPageHidden(); else requestWakeLock(); });
+window.addEventListener('pagehide', () => ctl.onPageUnload());
+
+/* ---------------- avvio ---------------- */
+$('notes').innerHTML = TESTS.map((t) => `<label class="nl" for="note-${t.id}">${t.id} · ${esc(t.title)}: osservazioni a voce</label><textarea class="note" id="note-${t.id}" data-id="${t.id}"></textarea>`).join('');
+$('notes').addEventListener('input', (ev) => { if (ev.target.dataset.id) runner.notes[ev.target.dataset.id] = ev.target.value; });
+$('rules').innerHTML = [
+  `Velocità massima inviata: ${kmh(SAFETY.SPEED_CAP_CENTI)}, costante nel codice. Unico valore sotto il minimo: 0,5 km/h, solo in T3.`,
+  'Senza tutte le spunte della lista di controllo non parte nessun test.',
+  'Stop sempre visibile in basso: invia 08 01.',
+  `Stop automatico per errore, risposta mancante oltre ${SAFETY.RESPONSE_TIMEOUT_MS / 1000} s, evento imprevisto, chiave tolta, pagina in background, perdita del collegamento.`,
+  'Un test alla volta; ogni test finisce con Stop e la tua conferma.',
+  'Ogni test si può saltare o interrompere; ordine dal più sicuro.',
+  `Ogni fase in moto dura al massimo ${SAFETY.PHASE_MAX_MS / 1000} s; avviso sonoro ${SAFETY.WARN_LEAD_MS / 1000} s prima dei cambi.`,
+  `Dopo la chiave: mai Start senza Stop, tuo gesto e conto alla rovescia di ${SAFETY.RESTART_COUNTDOWN_S} s.`,
+  'Scritture solo sul Control Point 0x2AD9; i servizi proprietari non sono raggiungibili.',
+].map((t) => `<li>${esc(t)}</li>`).join('');
+$('corrRule').textContent = `Regola: ${C.CORRELATION_RULE}`;
+setInterval(renderStatus, 500);
+log.add('SISTEMA', { text: `pagina caricata · tool v${C.TOOL_VERSION} · assunzioni ${C.ASSUMPTIONS_VERSION} · secure context ${window.isSecureContext} · Web Bluetooth ${!!(navigator.bluetooth && navigator.bluetooth.requestDevice)}` });
+render();
+})();
+</script>
+</body>
+</html>
