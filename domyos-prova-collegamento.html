@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Prova collegamento Run100E</title>
+<!--
+  PASSO 1 – Mini pagina di prova del collegamento Web Bluetooth.
+
+  Cosa fa:   diagnostica l'ambiente (secure context, Web Bluetooth, permessi),
+             si collega al tapis roulant, elenca i servizi accessibili e LEGGE
+             Device Information (0x180A). Nient'altro.
+  Cosa NON fa (regola di sicurezza di questo passo):
+             - nessuna scrittura su alcuna caratteristica (in questo file non
+               esiste nessuna chiamata a writeValue*);
+             - nessuna attivazione di notifiche o indicazioni;
+             - nessun accesso ai servizi proprietari 49535343-… e 02f00000-…
+               (non sono in optionalServices, quindi Chrome non li espone).
+  Per questo la pagina non ha un pulsante Stop: non può mettere in moto il
+  nastro. Il nastro deve essere fermo durante la prova.
+-->
+<style>
+:root{
+  /* Strumento da palestra: superfici neutre leggermente fredde, un accento blu acciaio, semantici a parte */
+  --bg:#f3f5f7; --panel:#ffffff; --fg:#14181d; --muted:#5a6470; --line:#d7dde3;
+  --accent:#1f5fa8; --accent-fg:#ffffff;
+  --ok:#1d7a3e; --warn:#9a6200; --err:#b3261e;
+  --mono:ui-monospace,"SFMono-Regular","Roboto Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0f1317; --panel:#171c22; --fg:#e8edf2; --muted:#9aa5b1; --line:#2a323b;
+    --accent:#5b9be0; --accent-fg:#06121f; --ok:#5cc489; --warn:#e6b048; --err:#f2827a; color-scheme:dark; }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:16px/1.45 var(--sans);
+  padding-block:max(12px,env(safe-area-inset-top,0px)) max(24px,env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+h1{font-size:1.35rem;margin:4px 0 0;text-wrap:balance}
+h2{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+p{margin:0}
+.lead{color:var(--muted)}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.rows{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;font-variant-numeric:tabular-nums}
+.rows dt{color:var(--muted)} .rows dd{margin:0;text-align:right;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+.btns{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{font:inherit;font-weight:700;min-height:56px;border-radius:10px;border:1px solid var(--line);
+  background:var(--panel);color:var(--fg);padding:8px 12px;cursor:pointer}
+button.primary{grid-column:1/-1;background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-size:1.1rem;min-height:64px}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+#status{font-weight:700;font-size:1.05rem}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+td{border-top:1px solid var(--line);padding:6px 4px;vertical-align:top;overflow-wrap:anywhere}
+td:first-child{color:var(--muted);width:42%}
+.mono{font-family:var(--mono);font-size:.85rem}
+#log{font-family:var(--mono);font-size:.78rem;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;
+  max-height:46vh;overflow:auto;margin:0;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px}
+.note{font-size:.88rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Prova collegamento Run100E</h1>
+    <p class="lead">Solo lettura. Si collega a DOMYOS-TC-7417, legge Device Information e si ferma. Non invia comandi al nastro.</p>
+  </header>
+
+  <section aria-labelledby="h-env">
+    <h2 id="h-env">Ambiente</h2>
+    <dl class="rows" id="env"></dl>
+  </section>
+
+  <section aria-labelledby="h-act">
+    <h2 id="h-act">Collegamento</h2>
+    <p id="status" role="status">Non collegato</p>
+    <div class="btns" style="margin-top:12px">
+      <button class="primary" id="btnConnect" type="button">Cerca e collega</button>
+      <button id="btnDisconnect" type="button" disabled>Scollega</button>
+      <button id="btnReread" type="button" disabled>Rileggi</button>
+      <button id="btnReconnect" type="button" disabled style="grid-column:1/-1">Ricollega senza scegliere</button>
+    </div>
+    <p class="note" style="margin-top:10px">Prova di ricollegamento: tocca Scollega, poi Ricollega senza scegliere. Serve a sapere se il tool potrà ricollegarsi da solo dopo una caduta, senza farti scegliere di nuovo il dispositivo.</p>
+    <p class="note" style="margin-top:10px">Prima: app Domyos chiusa, nRF Connect scollegato dal tapis roulant, Bluetooth acceso, nastro fermo.</p>
+  </section>
+
+  <section aria-labelledby="h-dis">
+    <h2 id="h-dis">Device Information (0x180A)</h2>
+    <table><tbody id="dis"><tr><td>—</td><td>Nessuna lettura</td></tr></tbody></table>
+  </section>
+
+  <section aria-labelledby="h-svc">
+    <h2 id="h-svc">Servizi accessibili</h2>
+    <table><tbody id="svc"><tr><td>—</td><td>Nessuna lettura</td></tr></tbody></table>
+  </section>
+
+  <section aria-labelledby="h-log">
+    <h2 id="h-log">Registro</h2>
+    <pre id="log"></pre>
+    <div class="btns" style="margin-top:10px">
+      <button id="btnCopy" type="button">Copia registro</button>
+      <button id="btnSave" type="button">Scarica .txt</button>
+    </div>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Costanti dai documenti tecnici (handoff 25/10 e addendum 27/10)
+// ---------------------------------------------------------------------------
+// Filtro: il prefisso del nome è sensibile alle maiuscole, quindi due filtri.
+const FILTERS = [{ namePrefix: 'DOMYOS' }, { namePrefix: 'Domyos' }];
+// Solo i servizi standard che servono. I due servizi proprietari NON sono
+// elencati: Chrome non li espone alla pagina, quindi nessuna scrittura
+// accidentale è possibile.
+const OPTIONAL_SERVICES = [0x1826, 0x180A, 0x180D];
+const SVC_NAMES = { 0x1826: 'Fitness Machine', 0x180A: 'Device Information', 0x180D: 'Heart Rate' };
+
+// Caratteristiche note di Device Information (standard Bluetooth SIG).
+// 'text' = stringa UTF-8, 'hex' = dati binari mostrati in esadecimale.
+const DIS_CHARS = {
+  0x2A29: ['Produttore', 'text'],
+  0x2A24: ['Modello', 'text'],
+  0x2A25: ['Numero di serie', 'text'],
+  0x2A27: ['Revisione hardware', 'text'],
+  0x2A26: ['Revisione firmware', 'text'],
+  0x2A28: ['Revisione software', 'text'],
+  0x2A23: ['System ID', 'hex'],
+  0x2A2A: ['Dati regolatori IEEE 11073', 'hex'],
+  0x2A50: ['PnP ID', 'pnp'],
+};
+const CONNECT_TIMEOUT_MS = 10000;
+
+// ---------------------------------------------------------------------------
+// Registro con timestamp in millisecondi
+// ---------------------------------------------------------------------------
+const logEl = document.getElementById('log');
+const lines = [];
+const t0 = performance.now();
+function stamp() {
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  const wall = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  const rel = (performance.now() - t0).toFixed(0).padStart(7, ' ');
+  return `${wall} +${rel}ms`;
+}
+function log(kind, msg) {
+  const line = `${stamp()}  ${kind.padEnd(5)} ${msg}`;
+  lines.push(line);
+  logEl.textContent += line + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------
+// Utilità
+// ---------------------------------------------------------------------------
+const hex = (dv) => Array.from(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength))
+  .map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+const short = (uuid) => {
+  const m = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/i.exec(uuid);
+  return m ? '0x' + m[1].toUpperCase() : uuid;
+};
+const shortNum = (uuid) => {
+  const m = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/i.exec(uuid);
+  return m ? parseInt(m[1], 16) : null;
+};
+function props(p) {
+  const out = [];
+  if (p.read) out.push('READ');
+  if (p.write) out.push('WRITE');
+  if (p.writeWithoutResponse) out.push('WRITE NO RESP');
+  if (p.notify) out.push('NOTIFY');
+  if (p.indicate) out.push('INDICATE');
+  return out.join(', ') || '—';
+}
+function decode(kind, dv) {
+  if (kind === 'text') return new TextDecoder('utf-8').decode(dv).replace(/\0+$/, '');
+  if (kind === 'pnp' && dv.byteLength >= 7) {
+    const src = dv.getUint8(0) === 1 ? 'Bluetooth SIG' : dv.getUint8(0) === 2 ? 'USB IF' : 'sorgente ' + dv.getUint8(0);
+    const v = (o) => '0x' + dv.getUint16(o, true).toString(16).toUpperCase().padStart(4, '0');
+    return `${src}, vendor ${v(1)}, product ${v(3)}, versione ${v(5)}`;
+  }
+  return hex(dv);
+}
+function withTimeout(promise, ms, what) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${what}: nessuna risposta entro ${ms} ms`)), ms); }),
+  ]);
+}
+function setStatus(text, cls) {
+  const s = document.getElementById('status');
+  s.textContent = text;
+  s.className = cls || '';
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---------------------------------------------------------------------------
+// Diagnostica dell'ambiente: risponde a "Web Bluetooth funziona da qui?"
+// ---------------------------------------------------------------------------
+const env = {};
+async function diagnose() {
+  env.protocol = location.protocol;
+  env.secure = window.isSecureContext;
+  env.inFrame = (() => { try { return window.self !== window.top; } catch { return true; } })();
+  env.api = !!(navigator.bluetooth && navigator.bluetooth.requestDevice);
+  const pp = document.permissionsPolicy || document.featurePolicy;
+  env.policy = pp && pp.allowsFeature ? pp.allowsFeature('bluetooth') : null;
+  env.adapter = null;
+  if (env.api && navigator.bluetooth.getAvailability) {
+    try { env.adapter = await navigator.bluetooth.getAvailability(); } catch { env.adapter = null; }
+  }
+  const m = /Chrome\/(\d+)/.exec(navigator.userAgent);
+  env.chrome = m ? m[1] : 'non rilevato';
+  env.android = /Android ([\d.]+)/.exec(navigator.userAgent)?.[1] || 'no';
+
+  const yes = (b, okText, badText) => b === null ? ['non determinabile', 'warn'] : b ? [okText, 'ok'] : [badText, 'err'];
+  const rows = [
+    ['Origine', [env.protocol.replace(':', ''), env.protocol === 'https:' ? 'ok' : 'warn']],
+    ['Secure context', yes(env.secure, 'sì', 'no – Web Bluetooth bloccato')],
+    ['Dentro un iframe', [env.inFrame ? 'sì' : 'no', env.inFrame ? 'warn' : 'ok']],
+    ['Permissions Policy bluetooth', yes(env.policy, 'consentita', 'bloccata')],
+    ['API Web Bluetooth', yes(env.api, 'presente', 'assente')],
+    ['Adattatore Bluetooth', yes(env.adapter, 'disponibile', 'spento o assente')],
+    ['Chrome', [env.chrome, 'ok']],
+    ['Android', [env.android, 'ok']],
+  ];
+  document.getElementById('env').innerHTML = rows
+    .map(([k, [v, c]]) => `<dt>${esc(k)}</dt><dd class="${c}">${esc(v)}</dd>`).join('');
+  log('ENV', `protocol=${env.protocol} secure=${env.secure} iframe=${env.inFrame} policy=${env.policy} api=${env.api} adapter=${env.adapter} chrome=${env.chrome} android=${env.android}`);
+  log('ENV', `UA: ${navigator.userAgent}`);
+
+  if (!env.api || env.secure === false || env.policy === false) {
+    const why = !env.secure ? 'la pagina non è in un secure context (serve https:// o localhost)'
+      : env.policy === false ? 'la pagina è in un iframe che non concede il permesso bluetooth'
+      : 'il browser non espone Web Bluetooth (serve Chrome per Android)';
+    setStatus('Web Bluetooth non disponibile: ' + why, 'err');
+    document.getElementById('btnConnect').disabled = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Collegamento e letture (sola lettura)
+// ---------------------------------------------------------------------------
+let device = null;
+let server = null;
+let tConnStart = 0;
+
+async function connect() {
+  // requestDevice deve partire direttamente dal tocco dell'utente
+  // (transient activation): nessun await prima di questa chiamata.
+  const btn = document.getElementById('btnConnect');
+  btn.disabled = true;
+  setStatus('Scelta del dispositivo…');
+  log('ACT', `requestDevice filtri=${JSON.stringify(FILTERS)} optionalServices=[${OPTIONAL_SERVICES.map((n) => '0x' + n.toString(16).toUpperCase()).join(', ')}]`);
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: FILTERS, optionalServices: OPTIONAL_SERVICES });
+  } catch (e) {
+    log('ERR', `requestDevice: ${e.name}: ${e.message}`);
+    setStatus(e.name === 'NotFoundError' ? 'Nessun dispositivo scelto' : `Errore: ${e.name}`, e.name === 'NotFoundError' ? 'warn' : 'err');
+    btn.disabled = false;
+    return;
+  }
+  log('INFO', `scelto: nome="${device.name}" id=${device.id}`);
+  device.addEventListener('gattserverdisconnected', onDisconnected);
+  await openGatt();
+}
+
+async function openGatt() {
+  document.getElementById('btnReconnect').disabled = true;
+  setStatus(`Collegamento a ${device.name}…`);
+  tConnStart = performance.now();
+  try {
+    server = await withTimeout(device.gatt.connect(), CONNECT_TIMEOUT_MS, 'gatt.connect');
+  } catch (e) {
+    log('ERR', `connect: ${e.name}: ${e.message}`);
+    setStatus('Collegamento non riuscito: ' + e.message, 'err');
+    document.getElementById('btnConnect').disabled = false;
+    document.getElementById('btnReconnect').disabled = !device;
+    return;
+  }
+  log('INFO', `collegato in ${(performance.now() - tConnStart).toFixed(0)} ms`);
+  setStatus(`Collegato a ${device.name}`, 'ok');
+  document.getElementById('btnDisconnect').disabled = false;
+  document.getElementById('btnReread').disabled = false;
+  await readAll();
+}
+
+async function readAll() {
+  if (!server || !server.connected) { log('WARN', 'non collegato: lettura saltata'); return; }
+  await listServices();
+  await readDIS();
+}
+
+async function listServices() {
+  const tbody = document.getElementById('svc');
+  const rows = [];
+  for (const id of OPTIONAL_SERVICES) {
+    const name = SVC_NAMES[id];
+    try {
+      const svc = await server.getPrimaryService(id);
+      const chars = await svc.getCharacteristics();
+      const list = chars.map((c) => `${short(c.uuid)} [${props(c.properties)}]`);
+      log('SVC', `0x${id.toString(16).toUpperCase()} ${name}: ${list.join('; ') || 'nessuna caratteristica'}`);
+      rows.push(`<tr><td>${esc(name)}<br><span class="mono">0x${id.toString(16).toUpperCase()}</span></td><td class="mono">${list.map(esc).join('<br>') || '—'}</td></tr>`);
+    } catch (e) {
+      log('SVC', `0x${id.toString(16).toUpperCase()} ${name}: non accessibile (${e.name}: ${e.message})`);
+      rows.push(`<tr><td>${esc(name)}<br><span class="mono">0x${id.toString(16).toUpperCase()}</span></td><td class="warn">non accessibile: ${esc(e.name)}</td></tr>`);
+    }
+  }
+  tbody.innerHTML = rows.join('');
+}
+
+async function readDIS() {
+  const tbody = document.getElementById('dis');
+  let svc;
+  try {
+    svc = await server.getPrimaryService(0x180A);
+  } catch (e) {
+    log('ERR', `Device Information non accessibile: ${e.name}: ${e.message}`);
+    tbody.innerHTML = `<tr><td>Servizio</td><td class="err">non accessibile: ${esc(e.name)}</td></tr>`;
+    return;
+  }
+  let chars = [];
+  try { chars = await svc.getCharacteristics(); } catch (e) { log('ERR', `getCharacteristics 0x180A: ${e.name}: ${e.message}`); }
+  const rows = [];
+  for (const c of chars) {
+    const num = shortNum(c.uuid);
+    const [label, kind] = DIS_CHARS[num] || [`Sconosciuta ${short(c.uuid)}`, 'hex'];
+    if (!c.properties.read) {
+      log('DIS', `${short(c.uuid)} ${label}: non leggibile (proprietà ${props(c.properties)})`);
+      rows.push(`<tr><td>${esc(label)}</td><td class="warn">non leggibile</td></tr>`);
+      continue;
+    }
+    const t = performance.now();
+    try {
+      const dv = await withTimeout(c.readValue(), 3000, `lettura ${short(c.uuid)}`);
+      const ms = (performance.now() - t).toFixed(0);
+      const text = decode(kind, dv);
+      log('READ', `${short(c.uuid)} ${label}: [${hex(dv)}] → "${text}" (${ms} ms)`);
+      rows.push(`<tr><td>${esc(label)}<br><span class="mono">${short(c.uuid)}</span></td><td><strong>${esc(text) || '<em>vuoto</em>'}</strong><br><span class="mono">${hex(dv) || '—'}</span></td></tr>`);
+    } catch (e) {
+      // 0x2A25 (numero di serie) è nella blocklist di Web Bluetooth: un
+      // SecurityError qui è atteso e non indica un problema di collegamento.
+      log('ERR', `${short(c.uuid)} ${label}: ${e.name}: ${e.message}`);
+      rows.push(`<tr><td>${esc(label)}<br><span class="mono">${short(c.uuid)}</span></td><td class="warn">${esc(e.name)}${e.name === 'SecurityError' ? ' (bloccata dal browser)' : ''}</td></tr>`);
+    }
+  }
+  if (!rows.length) rows.push('<tr><td>—</td><td class="warn">Nessuna caratteristica trovata</td></tr>');
+  tbody.innerHTML = rows.join('');
+  log('INFO', 'lettura Device Information completata');
+}
+
+function onDisconnected() {
+  log('DISC', `gattserverdisconnected (${device && device.name})`);
+  setStatus('Scollegato', 'warn');
+  document.getElementById('btnConnect').disabled = !env.api;
+  document.getElementById('btnDisconnect').disabled = true;
+  document.getElementById('btnReread').disabled = true;
+  document.getElementById('btnReconnect').disabled = !device;
+  server = null;
+}
+
+// Ricollegamento allo stesso dispositivo senza nuovo requestDevice.
+// Il tool completo ne avrà bisogno dopo una perdita di collegamento
+// (regola 4): qui si verifica che Chrome lo consenta.
+async function reconnect() {
+  if (!device) return;
+  log('ACT', `ricollegamento a ${device.name} senza requestDevice`);
+  await openGatt();
+}
+
+function disconnect() {
+  if (device && device.gatt.connected) { log('ACT', 'disconnect richiesto'); device.gatt.disconnect(); }
+}
+
+// ---------------------------------------------------------------------------
+// Esportazione del registro
+// ---------------------------------------------------------------------------
+function logText() {
+  return ['Prova collegamento Run100E – registro', `Esportato: ${new Date().toISOString()}`, '', ...lines].join('\n');
+}
+async function copyLog() {
+  try { await navigator.clipboard.writeText(logText()); log('INFO', 'registro copiato negli appunti'); }
+  catch (e) {
+    log('WARN', `copia non riuscita (${e.name}): seleziono il testo, copialo a mano`);
+    const r = document.createRange(); r.selectNodeContents(logEl);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  }
+}
+function saveLog() {
+  const blob = new Blob([logText()], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  const d = new Date();
+  a.href = URL.createObjectURL(blob);
+  a.download = `run100e-collegamento-${d.toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+document.getElementById('btnConnect').addEventListener('click', connect);
+document.getElementById('btnDisconnect').addEventListener('click', disconnect);
+document.getElementById('btnReconnect').addEventListener('click', reconnect);
+document.getElementById('btnReread').addEventListener('click', () => { log('ACT', 'rilettura'); readAll(); });
+document.getElementById('btnCopy').addEventListener('click', copyLog);
+document.getElementById('btnSave').addEventListener('click', saveLog);
+
+log('INFO', 'pagina caricata (versione mini 2, sola lettura)');
+diagnose();
+</script>
+</body>
+</html>
