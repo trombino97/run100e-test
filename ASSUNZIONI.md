@@ -1,11 +1,12 @@
 # Registro delle assunzioni – Banco prova Run100E
 
-Versione 2 · 27 ottobre 2026 · vale per il tool v1.0.0 (`run100e-banco-prova.html`)
+Versione 3 · 27 ottobre 2026 · vale per il tool v1.1.0 (`run100e-banco-prova.html`)
 
 Fonti di verità:
 - «Handoff tecnico» del 25/10/2026 (H);
 - «Addendum tecnico» del 27/10/2026 (A), che prevale su H in caso di contrasto;
-- registro della mini pagina del 27/10/2026 alle 16:36, inviato da Stefano (M).
+- registro della mini pagina del 27/10/2026 alle 16:36, inviato da Stefano (M);
+- registro e report del banco prova v1.0.0 del 27/10/2026, 18:05–18:14 (R).
 
 Ogni voce ha uno di tre stati:
 - **Confermata**: decisa o confermata da Stefano, oppure verificata su un registro reale.
@@ -51,8 +52,8 @@ Il codice e il report citano gli identificativi Axx.
 
 | ID | Assunzione | Stato | Fonte / motivo |
 |---|---|---|---|
-| A30 | Correlazione: un evento è «causato dal tool» se arriva entro 1,5 s da un comando dello stesso tipo. Abbinamenti: `04`↔`07`; `05`↔`02` con lo stesso valore; `02 01`↔`08 01`; `02 02`↔`08 02`; `01`↔`01`. Ogni comando spiega al massimo un evento. In tutti gli altri casi l'evento è «esterno». `03` è sempre esterno. | Decisa da Claude | A §8 suggerisce la finestra. Il confronto del valore serve nelle rampe veloci. |
-| A31 | Dopo la Pausa l'evento atteso è `02 02`. `02 01` → diverso dall'atteso; nessun evento → non conclusivo. | Ipotesi (standard FTMS) | A §4: «Non osservati: Pausa (02 02)». |
+| A30 | Correlazione: un evento è «causato dal tool» se arriva entro 1,5 s da un comando dello stesso tipo. Abbinamenti: `04`↔`07`; `05`↔`02` con lo stesso valore; `02 01`↔`08 01` **oppure `08 02`** (A61); `02 02`↔`08 02`; `01`↔`01`. Ogni comando spiega al massimo un evento. In tutti gli altri casi l'evento è «esterno». `03` è sempre esterno. | Decisa da Claude | A §8 suggerisce la finestra. Il confronto del valore serve nelle rampe veloci. |
+| A31 | Dopo la Pausa il Run100E invia `02 01`, non il `02 02` dello standard. Esito in T6: `02 01` causato dal tool → OK; `02 02` → diverso dall'atteso; nessun evento → non conclusivo. | **Osservata** (2 volte) | R: 18:11:10.193 (+1004 ms dalla Pausa) e 18:13:18.191 (+1001 ms). In v2 era un'ipotesi presa dallo standard. |
 | A32 | Dopo la ripresa da Pausa il nastro riparte da 1,0 km/h. | Atteso da H | H, non riprovato in A. |
 | A33 | L'effetto del Reset (`01`) è sconosciuto. Il tool lo invia solo in T9, a nastro fermo e dopo la tua conferma. Registra senza dare un giudizio, poi invia di nuovo Request Control. | Ipotesi | H e A si contraddicono: vale A («non verificato»). |
 | A34 | Treadmill Data si decodifica leggendo i flag, con l'ordine dei campi dello standard FTMS. Flag diversi da `A4 01` o una lunghezza diversa da 14 byte → anomalia nel report, senza Stop. | Ipotesi (standard FTMS) | H, A. |
@@ -63,6 +64,12 @@ Il codice e il report citano gli identificativi Axx.
 | A39 | Un solo comando in attesa di risposta alla volta. Lo Stop scavalca un comando in attesa; due Stop non partono mai insieme. Se Chrome risponde «GATT operation already in progress», lo Stop viene ritentato ogni 100 ms per 1,5 s. | Decisa da Claude | Limite noto di Web Bluetooth. |
 | A50 | T0 invia Request Control (`00`) per provare che le indicazioni arrivano davvero. | Decisa da Claude | Il comando non muove il nastro; è l'unico modo di confermare le indicazioni. |
 | A52 | Dopo lo Stop dato a chiave tolta non si attende alcun `02 01`. | Confermata | A §4: «Non compare se il nastro era già fermo dalla chiave». |
+| A61 | `02 01` arrivato entro 1,5 s da una Pausa del tool = causato dal tool. Fuori da questa finestra, `02 01` senza Stop o Pausa del tool resta un evento esterno e provoca Stop (Stop dalla console). | Decisa da Claude, su dati R | In v1.0 due Pause su due sono state prese per uno Stop dalla console. Il tool ha fermato il nastro (comportamento sicuro) e interrotto T6 e T9. |
+| A62 | Training Status arriva come notifica circa una volta al secondo, anche se il valore non cambia. Dopo lo Start resta `01 01` per circa 1 s, poi passa a `01 0D`. | Osservata | R. Non usata per decisioni (A20). |
+| A63 | Eventi e dati sembrano agganciati a un ciclo del tapis roulant di circa 1 s. Ritardi osservati: `04` 603–1094 ms; `05` 789–1087 ms (A: 0,7–0,8 s); `02 01` dopo Stop 674–1091 ms. Il margine sulla finestra di 1,5 s è di circa 0,4 s. | Osservata | R. La finestra resta 1,5 s; se un evento arriva oltre, il tool ferma il nastro (sicuro, ma interrompe il test). |
+| A64 | Body Sensor Location = `02` (Polso). | Osservata | R, T0. Nessun atteso nei documenti. |
+| A65 | Una velocità inviata a nastro fermo riceve `80 02 01`, non genera eventi e non cambia i dati (0,0 km/h); lo Start successivo parte da 1,0 km/h. | **Osservata** | R, T2 parte A. Conferma con i dati l'osservazione a voce dell'Addendum. |
+| A66 | I tempi di risposta reali arrivano fino a 160 ms (Stop) e 119 ms (Set Target Speed), oltre i 48–88 ms dell'Addendum. Il limite di 2 s ha ampio margine. | Osservata | R; misura secondo A35. |
 | A55 | La finestra di correlazione parte dall'invio del comando. | Decisa da Claude | — |
 
 ## Test
@@ -77,7 +84,7 @@ Il codice e il report citano gli identificativi Axx.
 | A45 | T7: ti chiede di restare sotto 5 km/h e ti dà 45 s. | Decisa da Claude | Margine rispetto al tetto; la fase resta sotto i 60 s. |
 | A46 | T9: per avere contatori non a zero a nastro fermo, 15 s a 6,0 km/h e poi Pausa. | Decisa da Claude | H: la Pausa conserva i contatori, lo Stop li azzera. |
 | A47 | Dopo la chiave, lo Start richiede il tuo tocco e un conto alla rovescia di 5 s. Il permesso vale 3 s e una sola volta. Vale in qualunque test che segue un `03`. | Decisa da Claude | Regola 8. |
-| A48 | Feature attesa, presa dalla descrizione di H: macchina = distanza totale, passo, energia, battito; target = solo velocità. | Ipotesi | H non riporta i byte. |
+| A48 | Feature: `24 06 00 00 01 00 00 00` = macchina: distanza totale, passo, energia, battito; target: solo velocità. | **Confermata** | R, T0. |
 | A49 | Training Status atteso a nastro fermo: `01 01` Idle. Indicativo. | Confermata con riserva | H; A §2.7 lo dichiara non affidabile. |
 | A58 | T4: dopo l'ultimo comando di salita e di discesa, il tool aspetta al massimo 3 s il valore finale nei dati. | Decisa da Claude | Tiene ogni profilo sotto i 60 s. |
 | A59 | Bip di preavviso 5 s prima della durata massima. | Decisa da Claude | — |
@@ -88,4 +95,5 @@ Il codice e il report citano gli identificativi Axx.
 ## Storico delle modifiche
 
 - v1, 27/10/2026 12:35: prima stesura, dopo le risposte alle cinque domande.
+- v3, 27/10/2026 sera: dati della prima sessione reale (R). A31 osservata; A30 estesa; A48 confermata; nuove A61–A66.
 - v2, 27/10/2026: esito della mini pagina (A03 e A07 confermate, A04 corretta, A06 nuova). Aggiunte le voci A12b, A36–A39, A44–A50, A52, A55, A58–A60. Precisate A19 (Stop immediato prima delle indicazioni) e A35 (misura dalla chiamata di scrittura).

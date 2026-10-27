@@ -258,8 +258,8 @@ details summary { cursor: pointer; font-weight: 700; min-height: 40px; display: 
 (function (root) {
 'use strict';
 
-const TOOL_VERSION = '1.0.0';
-const ASSUMPTIONS_VERSION = 'v2 del 27/10/2026';
+const TOOL_VERSION = '1.1.0';
+const ASSUMPTIONS_VERSION = 'v3 del 27/10/2026';
 
 /* -------------------------------------------------------------------------
  * COSTANTI DI SICUREZZA. Ogni valore qui è una regola, non una preferenza.
@@ -451,26 +451,28 @@ class Logger {
 }
 
 /* ------------------------- correlazione eventi (§6) ---------------------- */
-const EVENT_TO_CMD = { '04': 'start', '05': 'speed', '02 01': 'stop', '02 02': 'pause', '01': 'reset' };
+// A61: il Run100E segnala anche la Pausa con 02 01 (osservato due volte il
+// 27/10 alle 18:11 e alle 18:13, circa 1 s dopo 08 02).
+const EVENT_TO_CMD = { '04': ['start'], '05': ['speed'], '02 01': ['stop', 'pause'], '02 02': ['pause'], '01': ['reset'] };
 const CMD_TYPE_LABEL = { start: '07', speed: '02 con lo stesso valore', stop: '08 01', pause: '08 02', reset: '01' };
-const CORRELATION_RULE = `Un evento è «causato dal tool» se arriva entro ${SAFETY.CORRELATION_WINDOW_MS} ms dall'invio di un comando dello stesso tipo: 04↔07, 05↔02 con lo stesso valore, 02 01↔08 01, 02 02↔08 02, 01↔01. Ogni comando spiega al massimo un evento. Altrimenti è «esterno». 03 (chiave) è sempre esterno. (A30, A55)`;
+const CORRELATION_RULE = `Un evento è «causato dal tool» se arriva entro ${SAFETY.CORRELATION_WINDOW_MS} ms dall'invio di un comando dello stesso tipo: 04↔07, 05↔02 con lo stesso valore, 02 01↔08 01 oppure 08 02 (il Run100E segnala così anche la Pausa), 02 02↔08 02, 01↔01. Ogni comando spiega al massimo un evento. Altrimenti è «esterno». 03 (chiave) è sempre esterno. (A30, A55, A61)`;
 class Correlator {
   constructor() { this.cmds = []; }
   note(cmd) { this.cmds.push({ ...cmd, matched: false }); if (this.cmds.length > 300) this.cmds.shift(); }
   classify(evt) {
     const W = SAFETY.CORRELATION_WINDOW_MS;
-    const type = EVENT_TO_CMD[evt.key];
-    if (!type) return { origin: 'external', rule: evt.key === '03' ? 'la chiave è sempre un evento esterno' : 'nessun comando del tool produce questo evento' };
+    const types = EVENT_TO_CMD[evt.key];
+    if (!types) return { origin: 'external', rule: evt.key === '03' ? 'la chiave è sempre un evento esterno' : 'nessun comando del tool produce questo evento' };
     let best = null;
     for (const c of this.cmds) {
-      if (c.type !== type || c.matched) continue;
+      if (!types.includes(c.type) || c.matched) continue;
       const dt = evt.t - c.tSend;
       if (dt < 0 || dt > W) continue;
-      if (type === 'speed' && c.centi !== evt.centi) continue;
+      if (c.type === 'speed' && c.centi !== evt.centi) continue;
       if (!best || c.tSend > best.tSend) best = c;
     }
     if (best) { best.matched = true; return { origin: 'tool', cmdId: best.id, deltaMs: evt.t - best.tSend, rule: `+${Math.round(evt.t - best.tSend)} ms dal comando #${best.id} ${best.label} (finestra ${W} ms)` }; }
-    return { origin: 'external', rule: `nessun comando ${CMD_TYPE_LABEL[type]} nei ${W} ms precedenti` };
+    return { origin: 'external', rule: `nessun comando ${types.map((x) => CMD_TYPE_LABEL[x]).join(' o ')} nei ${W} ms precedenti` };
   }
 }
 
@@ -1263,7 +1265,7 @@ const TESTS = [
       const t = r.cmd.tSend;
       ctx.check({ name: 'risposta a 08 02 Pausa', expected: '80 08 01', actual: hex(r.bytes), verdict: V.OK, ref: 'Handoff test 3' });
       const ev = await ctx.waitEvent((e) => e.evt.code === 0x02, { since: t, timeout: 2500 });
-      ctx.check({ name: 'evento dopo la Pausa', expected: '02 02 (ipotesi da standard FTMS)', actual: ev ? `${ev.evt.key}, ${originLabel(ev.cls)}, dopo ${msTxt(ev.t - t)}` : 'nessun evento entro 2,5 s', verdict: !ev ? V.NC : ev.evt.key === '02 02' ? V.OK : V.DIFF, ref: 'A31' });
+      ctx.check({ name: 'evento dopo la Pausa', expected: '02 01 causato dal tool (osservato il 27/10; lo standard FTMS prevede 02 02)', actual: ev ? `${ev.evt.key}, ${originLabel(ev.cls)}, dopo ${msTxt(ev.t - t)}` : 'nessun evento entro 2,5 s', verdict: !ev ? V.NC : ev.evt.key === '02 01' && ev.cls.origin === 'tool' ? V.OK : V.DIFF, ref: 'A31, A61' });
       if (ev) ctx.timing('evento 02 xx dopo 08 02 Pausa', ev.t - t);
       const dz = await ctx.waitData((p) => p.speedCenti === 0, { since: t, timeout: 4000 });
       ctx.check({ name: 'velocità nei dati durante la Pausa', expected: 'non documentata', actual: dz ? `0,0 km/h dopo ${msTxt(dz.t - t)}` : `non a 0 entro 4 s (${kmh(ctx.lastData() && ctx.lastData().speedCenti)})`, verdict: V.NC, ref: 'A31' });
