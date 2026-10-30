@@ -1,12 +1,14 @@
 # Registro delle assunzioni – Banco prova Run100E
 
-Versione 3 · 27 ottobre 2026 · vale per il tool v1.1.0 (`run100e-banco-prova.html`)
+Versione 6 · 30 ottobre 2026 · vale per il tool v1.2.0 (`run100e-banco-prova.html`)
 
 Fonti di verità:
 - «Handoff tecnico» del 25/10/2026 (H);
 - «Addendum tecnico» del 27/10/2026 (A), che prevale su H in caso di contrasto;
 - registro della mini pagina del 27/10/2026 alle 16:36, inviato da Stefano (M);
-- registro e report del banco prova v1.0.0 del 27/10/2026, 18:05–18:14 (R).
+- registro e report del banco prova v1.0.0 del 27/10/2026, 18:05–18:14 (R);
+- registro del banco prova v1.1.0 del 30/10/2026, 09:37–09:41, T5 e T9 (R2);
+- registro del banco prova v1.1.0 del 30/10/2026, 09:45, T6 (R3).
 
 Ogni voce ha uno di tre stati:
 - **Confermata**: decisa o confermata da Stefano, oppure verificata su un registro reale.
@@ -54,8 +56,8 @@ Il codice e il report citano gli identificativi Axx.
 |---|---|---|---|
 | A30 | Correlazione: un evento è «causato dal tool» se arriva entro 1,5 s da un comando dello stesso tipo. Abbinamenti: `04`↔`07`; `05`↔`02` con lo stesso valore; `02 01`↔`08 01` **oppure `08 02`** (A61); `02 02`↔`08 02`; `01`↔`01`. Ogni comando spiega al massimo un evento. In tutti gli altri casi l'evento è «esterno». `03` è sempre esterno. | Decisa da Claude | A §8 suggerisce la finestra. Il confronto del valore serve nelle rampe veloci. |
 | A31 | Dopo la Pausa il Run100E invia `02 01`, non il `02 02` dello standard. Esito in T6: `02 01` causato dal tool → OK; `02 02` → diverso dall'atteso; nessun evento → non conclusivo. | **Osservata** (2 volte) | R: 18:11:10.193 (+1004 ms dalla Pausa) e 18:13:18.191 (+1001 ms). In v2 era un'ipotesi presa dallo standard. |
-| A32 | Dopo la ripresa da Pausa il nastro riparte da 1,0 km/h. | Atteso da H | H, non riprovato in A. |
-| A33 | L'effetto del Reset (`01`) è sconosciuto. Il tool lo invia solo in T9, a nastro fermo e dopo la tua conferma. Registra senza dare un giudizio, poi invia di nuovo Request Control. | Ipotesi | H e A si contraddicono: vale A («non verificato»). |
+| A32 | Dopo la ripresa da Pausa il nastro riparte da 1,0 km/h. | **Confermata** | R3: 1,0 km/h nei dati 1,8 s dopo `07` e osservazione a voce «lento, circa 1 km/h». Coincide con H. |
+| A33 | Reset (`01`) a nastro fermo: risposta `80 01 01`, nessun evento, contatori a zero nel pacchetto successivo (circa 1,2 s). La console torna alla schermata iniziale, quella che compare quando l'app si collega, con tutti i contatori azzerati. Il Request Control inviato subito dopo risponde `80 00 01`. Resta **non verificato** se il Reset revochi il controllo: il tool rinvia comunque Request Control. | **Osservata** (1 volta) | R2, 09:39:52; osservazione a voce di Stefano. H e A si contraddicevano; ora c'è un dato. |
 | A34 | Treadmill Data si decodifica leggendo i flag, con l'ordine dei campi dello standard FTMS. Flag diversi da `A4 01` o una lunghezza diversa da 14 byte → anomalia nel report, senza Stop. | Ipotesi (standard FTMS) | H, A. |
 | A35 | Tempo di risposta = dalla chiamata di scrittura all'arrivo dell'indicazione. | Decisa da Claude | Non si sa come misurava nRF Connect: il confronto con 48–88 ms è indicativo. |
 | A36 | Un `05` esterno fino a 2,0 km/h entro 3 s da uno Start è tollerato e marcato nel registro. | Ipotesi | Non si sa se lo Start produca un `05`. H: il nastro parte a 1,0 o a 2,0 km/h. Senza tolleranza ogni Start potrebbe causare uno Stop. |
@@ -70,6 +72,13 @@ Il codice e il report citano gli identificativi Axx.
 | A64 | Body Sensor Location = `02` (Polso). | Osservata | R, T0. Nessun atteso nei documenti. |
 | A65 | Una velocità inviata a nastro fermo riceve `80 02 01`, non genera eventi e non cambia i dati (0,0 km/h); lo Start successivo parte da 1,0 km/h. | **Osservata** | R, T2 parte A. Conferma con i dati l'osservazione a voce dell'Addendum. |
 | A66 | I tempi di risposta reali arrivano fino a 160 ms (Stop) e 119 ms (Set Target Speed), oltre i 48–88 ms dell'Addendum. Il limite di 2 s ha ampio margine. | Osservata | R; misura secondo A35. |
+| A67 | Dopo la Pausa: velocità nei dati a 0,0 in circa 1 s, Training Status `01 01` Idle nello stesso secondo, contatori **conservati** (almeno 10 s). | **Osservata** (1 volta) | R2, 09:39:42–09:39:52. Conferma l'Handoff sui contatori. |
+| A68 | La correzione A61 funziona: dopo la Pausa il `02 01` è classificato come causato dal tool (+591 ms in R2, +613 ms in R3) e il test non si interrompe. Pausa → `02 01` osservato 4 volte su 4. | **Confermata** | R2, R3. |
+| A69 | Durante un salto di velocità i dati (e l'evento `05`) riportano il valore di arrivo già dopo circa 2 s, mentre il nastro accelera gradualmente: da 2 a 8 km/h in circa 6–7 s, cioè circa 1 km/h al secondo (stima). Conseguenza per l'app: la velocità nei dati non dice quando il nastro è davvero a regime. | Osservata (A44 + R2) | Conferma A §2 («valore impostato, non misura»). La stima di 1 km/h al secondo è un'ipotesi ricavata da un solo salto. |
+| A70 | In T10 e T11 il background e la perdita del collegamento sono provocati di proposito. Tutte le protezioni restano attive (Stop, allarme, ricollegamento, Stop dopo il ricollegamento); cambia solo che il test non si interrompe, perché deve osservare l'esito. In ogni altro test questi eventi interrompono il test come prima. | Decisa da Claude | Senza questa eccezione i due test si interromperebbero nel momento esatto che devono misurare. |
+| A71 | T10 giudica se il codice gira in background da tre segnali: Stop inviato entro 200 ms dall'uscita; risposta allo Stop arrivata prima del ritorno su Chrome; pacchetti Treadmill Data ricevuti durante il background (circa uno al secondo). Se Chrome congela la pagina, l'uscita viene registrata solo al ritorno: in quel caso lo rivelano la tua osservazione e i pacchetti mancanti. | Decisa da Claude | Il tool registra anche gli eventi `freeze` e `resume` di Chrome, se arrivano. |
+| A72 | Ordine dei nuovi test: T10 (background, il nastro resta senza controllo per pochi secondi) prima di T11 (perdita del collegamento, il nastro gira per tutto il tempo in cui il Bluetooth resta spento). Entrambi a 2,0 km/h. T9 resta facoltativo ma non è più l'ultimo. | Decisa da Claude | Regola 6: dal più sicuro al più impegnativo. Nella proposta del 30/10 l'ordine era invertito. |
+| A73 | Se un ricollegamento manuale fallisce (per esempio dopo aver spento e riacceso il Bluetooth), al tocco successivo su «Collega» si sceglie di nuovo il dispositivo. | Decisa da Claude | Dopo un riavvio del Bluetooth il dispositivo memorizzato da Chrome potrebbe non essere più valido (ipotesi). |
 | A55 | La finestra di correlazione parte dall'invio del comando. | Decisa da Claude | — |
 
 ## Test
@@ -80,9 +89,9 @@ Il codice e il report citano gli identificativi Axx.
 | A41 | T3 si esegue a 2,5 km/h: prima 0,5 km/h (atteso `80 02 03`), poi 2,0 km/h. | Decisa da Claude | Ripete H, test 3. |
 | A42 | T4: Start, poi 6,0 km/h con un solo comando, poi la rampa. Se 6,0 km/h non compare nei dati entro 5 s, il profilo si salta (non conclusivo). | Decisa da Claude | A: un salto 1,0 → 8,0 km/h è già stato fatto. |
 | A43 | T5: il tempo misurato con il tuo pulsante è un'osservazione, non un dato. | Confermata | Richiesta T5. |
-| A44 | T5: atteso «nastro a velocità» a 2–3 s dal comando, con ±0,5 s di tolleranza per il tempo di reazione. | Decisa da Claude | A §5 (osservazione a voce). |
+| A44 | T5: il nastro arriva a 8 km/h circa 6–7 s dopo il comando. Atteso del tempo misurato a occhio: 5–8 s. | **Osservata** (Stefano, 30/10, guardando la console e il nastro) | Le misure a pulsante (8,7 s il 27/10 per distrazione, 6,9 s il 30/10) restano indicative. Il valore di 2–3 s di A §5 non è confermato. |
 | A45 | T7: ti chiede di restare sotto 5 km/h e ti dà 45 s. | Decisa da Claude | Margine rispetto al tetto; la fase resta sotto i 60 s. |
-| A46 | T9: per avere contatori non a zero a nastro fermo, 15 s a 6,0 km/h e poi Pausa. | Decisa da Claude | H: la Pausa conserva i contatori, lo Stop li azzera. |
+| A46 | T9: per avere contatori non a zero a nastro fermo, 15 s a 6,0 km/h e poi Pausa. | **Confermata** | R2: dopo la Pausa l'energia è rimasta a 1 kcal per 10 s, fino al Reset. Dopo uno Stop i contatori si azzerano in circa 2 s (A §5). |
 | A47 | Dopo la chiave, lo Start richiede il tuo tocco e un conto alla rovescia di 5 s. Il permesso vale 3 s e una sola volta. Vale in qualunque test che segue un `03`. | Decisa da Claude | Regola 8. |
 | A48 | Feature: `24 06 00 00 01 00 00 00` = macchina: distanza totale, passo, energia, battito; target: solo velocità. | **Confermata** | R, T0. |
 | A49 | Training Status atteso a nastro fermo: `01 01` Idle. Indicativo. | Confermata con riserva | H; A §2.7 lo dichiara non affidabile. |
@@ -95,5 +104,8 @@ Il codice e il report citano gli identificativi Axx.
 ## Storico delle modifiche
 
 - v1, 27/10/2026 12:35: prima stesura, dopo le risposte alle cinque domande.
+- v6, 30/10/2026: tool v1.2.0 con T10 e T11. A44 aggiornata con l'osservazione di Stefano; nuove A69–A73. L'intestazione del registro ora riporta «assunzioni v6».
+- v5, 30/10/2026: T6 completato (R3). A32 confermata, A68 aggiornata. Il tool v1.1.0 riporta ancora «assunzioni v3» nell'intestazione: l'etichetta verrà allineata alla prossima versione del tool.
+- v4, 30/10/2026: dati di T5 e T9 (R2). A33 osservata, A46 confermata, A44 da rivedere; nuove A67–A68. T6 non ancora eseguito con la v1.1.
 - v3, 27/10/2026 sera: dati della prima sessione reale (R). A31 osservata; A30 estesa; A48 confermata; nuove A61–A66.
 - v2, 27/10/2026: esito della mini pagina (A03 e A07 confermate, A04 corretta, A06 nuova). Aggiunte le voci A12b, A36–A39, A44–A50, A52, A55, A58–A60. Precisate A19 (Stop immediato prima delle indicazioni) e A35 (misura dalla chiamata di scrittura).

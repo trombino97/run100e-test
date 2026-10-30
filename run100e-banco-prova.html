@@ -258,8 +258,8 @@ details summary { cursor: pointer; font-weight: 700; min-height: 40px; display: 
 (function (root) {
 'use strict';
 
-const TOOL_VERSION = '1.1.0';
-const ASSUMPTIONS_VERSION = 'v3 del 27/10/2026';
+const TOOL_VERSION = '1.2.0';
+const ASSUMPTIONS_VERSION = 'v6 del 30/10/2026';
 
 /* -------------------------------------------------------------------------
  * COSTANTI DI SICUREZZA. Ogni valore qui è una regola, non una preferenza.
@@ -496,6 +496,11 @@ class SafetyController {
     this.emergencyInProgress = null; this.lastAutoStop = null; this.lastOverspeedT = -Infinity;
     this.manualStopRequired = false; this.userDisconnect = false; this.reconnecting = false;
     this.onAbortTest = null; this.listeners = {}; this.flagsSeen = new Set();
+    // A70: eventi provocati di proposito da T10 e T11. Le protezioni restano
+    // tutte attive (Stop, allarme, ricollegamento); cambia solo che il test
+    // non viene interrotto, perché deve osservare cosa succede.
+    this.expect = {};
+    this.lastHidden = null; this.lastVisible = null; this.lastLinkLoss = null; this.lastRecovery = null;
     this.t.onDisconnect = () => this._onDisconnect();
   }
   on(type, fn) { (this.listeners[type] = this.listeners[type] || new Set()).add(fn); }
@@ -733,7 +738,13 @@ class SafetyController {
   }
   // A05: Chrome può sospendere una pagina in background, e il nastro non si
   // ferma da solo. Appena la pagina viene nascosta si invia Stop.
-  onPageHidden() { if (this.link === 'connected') this.emergencyStop('pagina in background o schermo spento (A05)'); }
+  onPageHidden() {
+    this.lastHidden = { t: this.env.now() };
+    this.log.add('SISTEMA', { text: 'pagina nascosta (background o schermo spento)' });
+    if (this.link === 'connected') this.emergencyStop('pagina in background o schermo spento (A05)', { abortTest: !this.expect.hidden });
+  }
+  onPageVisible() { this.lastVisible = { t: this.env.now() }; this.log.add('SISTEMA', { text: 'pagina di nuovo visibile' }); this._emitState(); }
+  onPageFreeze(frozen) { this.log.add('SISTEMA', { text: frozen ? 'Chrome ha congelato la pagina (evento freeze)' : 'Chrome ha ripreso la pagina (evento resume)' }); }
   onPageUnload() { if (this.link === 'connected' && this.t.connected) { try { this._noteCmd(Ftms.stop(), ' (chiusura della pagina)'); this.t.write('cp', Ftms.stop()).catch(() => {}); } catch (_) { /* nulla da fare */ } } }
   userStop() {
     if (this.link !== 'connected') { this._requireManualStop('Stop premuto ma tapis roulant non collegato'); return Promise.resolve({ ok: false }); }
@@ -820,9 +831,13 @@ class SafetyController {
     if (this.userDisconnect) { this.userDisconnect = false; this.link = 'disconnected'; this.log.add('SISTEMA', { text: 'scollegato su tua richiesta' }); this._emitState(); return; }
     if (this.reconnecting) { this.link = 'reconnecting'; this.log.add('SICUREZZA', { text: 'collegamento perso di nuovo durante il ricollegamento' }); this._emitState(); return; }
     this.link = 'lost'; this.manualStopRequired = true;
-    const msg = 'Il nastro continua alla velocità dell\'ultimo comando. Fermalo adesso con lo Stop della console o togliendo la chiave.';
+    this.lastLinkLoss = { t: this.env.now() };
+    this.lastRecovery = { tLost: this.lastLinkLoss.t, ok: false, attempts: 0, tReconnected: null, tQuickStop: null, tStop: null, bytes: null, error: null };
+    let msg = 'Il nastro continua alla velocità dell\'ultimo comando. Fermalo adesso con lo Stop della console o togliendo la chiave.';
     this.log.add('SICUREZZA', { text: 'COLLEGAMENTO PERSO. ' + msg });
-    if (this.onAbortTest) this.onAbortTest('collegamento perso');
+    if (this.expect.linkLoss) {
+      msg = 'Prova T11 in corso: il nastro continua a 2,0 km/h. Riaccendi il Bluetooth dopo circa 10 s: il tool deve ricollegarsi e fermare il nastro. Se dopo 30 s gira ancora, o se qualcosa non va, fermalo con la console o la chiave.';
+    } else if (this.onAbortTest) this.onAbortTest('collegamento perso');
     this.ui.alert('lost', msg);
     this._emitState();
     this._reconnectLoop();
@@ -833,18 +848,21 @@ class SafetyController {
       for (let i = 1; i <= SAFETY.RECONNECT_ATTEMPTS; i++) {
         this.ui.alert('progress', `Ricollegamento: tentativo ${i} di ${SAFETY.RECONNECT_ATTEMPTS}`);
         this.log.add('SISTEMA', { text: `ricollegamento: tentativo ${i} di ${SAFETY.RECONNECT_ATTEMPTS}` });
+        const rec = this.lastRecovery; if (rec) rec.attempts = i;
         try { await this.t.connect(); }
         catch (e) { this.log.add('ERRORE', { text: `tentativo ${i} non riuscito: ${e.message}` }); await this._delay(SAFETY.RECONNECT_INTERVAL_MS); continue; }
         this.link = 'connected'; this.log.add('SISTEMA', { text: 'ricollegato' });
+        if (rec) rec.tReconnected = this.env.now();
         // 1) Stop subito, prima di riattivare le indicazioni: l'Handoff ha
         //    visto lo Stop accettato appena dopo una riconnessione.
-        try { this._noteCmd(Ftms.stop(), ' (subito dopo il ricollegamento; risposta non visibile)'); await this._write(Ftms.stop(), true); }
+        try { this._noteCmd(Ftms.stop(), ' (subito dopo il ricollegamento; risposta non visibile)'); if (rec) rec.tQuickStop = this.env.now(); await this._write(Ftms.stop(), true); }
         catch (e) { this.log.add('ERRORE', { text: `Stop immediato non riuscito: ${e.message}` }); }
         // 2) Le sottoscrizioni si sono azzerate: si riattivano tutte.
         await this._subscribeAll();
         // 3) Stop con risposta verificata.
         try {
           const r = await this.stop('ricollegamento (A19)');
+          if (rec) { rec.ok = true; rec.tStop = r.tResp; rec.bytes = r.bytes; }
           this.ui.alert('recovered', `Ricollegato. Stop confermato dal tapis roulant (${hex(r.bytes)}). Guarda il nastro e conferma che è fermo.`);
           return;
         } catch (e) {
@@ -853,6 +871,7 @@ class SafetyController {
         }
       }
       this.link = 'disconnected';
+      if (this.lastRecovery) this.lastRecovery.error = 'tentativi esauriti';
       this._requireManualStop(`Ricollegamento non riuscito dopo ${SAFETY.RECONNECT_ATTEMPTS} tentativi`);
     } finally { this.reconnecting = false; this._emitState(); }
   }
@@ -929,6 +948,9 @@ class TestContext {
     return c;
   }
   timing(metric, ms, source = 'DATI') { const m = (this.run.timings[metric] = this.run.timings[metric] || { source, values: [] }); m.values.push(ms); }
+  // A70: dichiara che il test provoca di proposito la caduta o il background.
+  expectEvent(kind) { this.ctl.expect[kind] = true; this.log.add('SISTEMA', { text: `prova prevista: ${kind === 'hidden' ? 'pagina in background' : 'perdita del collegamento'}` }); }
+  async waitUntil(pred, timeoutMs, stepMs = 250) { const end = this.now() + timeoutMs; while (!pred()) { if (this.now() >= end) return false; await this.sleep(stepMs); } return true; }
   setPolicy(list) { this.ctl.policy = { allowExternal: new Set(list || []) }; this.log.add('SISTEMA', { text: list && list.length ? `eventi esterni attesi in questa fase: ${list.join(', ')}` : 'nessun evento esterno atteso' }); }
   _wait(stream, pred, { since, timeout }) {
     this._checkAbort();
@@ -1245,8 +1267,8 @@ const TESTS = [
       if (ans.choice === 'at-speed') {
         const bt = ans.t - t;
         ctx.timing('nastro a velocità dopo il salto (a occhio)', bt, 'OSSERVAZIONE');
-        ctx.check({ name: 'nastro a velocità (a occhio)', expected: '2–3 s, tolleranza ±0,5 s per il tempo di reazione', actual: `${msTxt(bt)}${d ? `; differenza rispetto ai dati: ${bt - dt >= 0 ? '+' : ''}${msTxt(bt - dt)}` : ''}`, verdict: bt >= 1500 && bt <= 3500 ? V.OK : V.DIFF, source: 'OSSERVAZIONE', ref: 'Addendum §5, A44' });
-      } else ctx.check({ name: 'nastro a velocità (a occhio)', expected: '2–3 s', actual: choiceLabel(spec, ans), verdict: V.NC, source: 'OSSERVAZIONE', ref: 'Addendum §5' });
+        ctx.check({ name: 'nastro a velocità (a occhio)', expected: 'circa 6–7 s, tolleranza ±1 s (osservazione del 30/10)', actual: `${msTxt(bt)}${d ? `; differenza rispetto ai dati: ${bt - dt >= 0 ? '+' : ''}${msTxt(bt - dt)}` : ''}`, verdict: bt >= 5000 && bt <= 8000 ? V.OK : V.DIFF, source: 'OSSERVAZIONE', ref: 'A44, A69' });
+      } else ctx.check({ name: 'nastro a velocità (a occhio)', expected: 'circa 6–7 s', actual: choiceLabel(spec, ans), verdict: V.NC, source: 'OSSERVAZIONE', ref: 'A44, A69' });
       await ctx.sleep(2000);
       await stopObserved(ctx);
     },
@@ -1391,6 +1413,75 @@ const TESTS = [
       await observe(ctx, { id: 'T9-console', title: 'Cosa mostra la console dopo il Reset?', note: true, choices: [{ id: 'zero', label: 'Contatori azzerati' }, { id: 'same', label: 'Contatori invariati' }, { id: 'other', label: 'Altro (scrivi una nota)' }, { id: 'unknown', label: 'Non so' }] }, null, 'da osservare', 'A33');
     },
   },
+  {
+    id: 'T10', title: 'Pagina in background', motion: true, maxCenti: 200,
+    desc: 'A 2,0 km/h esci da Chrome (tasto Home) per circa 5 s. Atteso: il tool invia Stop appena la pagina viene nascosta (A05). Il test misura se Chrome lascia girare il codice in background.',
+    async run(ctx) {
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1000);
+      await setSpeedObserved(ctx, 200);
+      await ctx.sleep(2000);
+      ctx.section('Uscita da Chrome');
+      ctx.expectEvent('hidden');
+      const tAsk = ctx.now();
+      const a = await ctx.ask({ id: 'T10-home', title: 'Esci da Chrome per circa 5 s', text: 'Premi il tasto Home (oppure passa a un\'altra app) e guarda il nastro. Dopo circa 5 s torna su Chrome e tocca «Sono tornato». Se il nastro non si ferma e qualcosa non va, usa la console o la chiave.', choices: [{ id: 'back', label: 'Sono tornato' }, { id: 'fail', label: 'Non sono riuscito a uscire' }], timeoutMs: 90000 });
+      const hid = ctx.ctl.lastHidden && ctx.ctl.lastHidden.t >= tAsk ? ctx.ctl.lastHidden.t : null;
+      const vis = hid && ctx.ctl.lastVisible && ctx.ctl.lastVisible.t >= hid ? ctx.ctl.lastVisible.t : null;
+      if (!hid || !vis) { ctx.check({ name: 'pagina nascosta e poi di nuovo visibile', expected: 'uscita e ritorno registrati', actual: !hid ? 'Chrome non ha segnalato l\'uscita' : 'ritorno non registrato', verdict: a.choice === 'fail' ? V.NC : V.DIFF, ref: 'A05' }); return; }
+      ctx.timing('durata del background', vis - hid);
+      const stopCmd = ctx.ctl.history.find((c) => c.type === 'stop' && c.tSend >= hid);
+      ctx.check({ name: 'Stop inviato quando la pagina è stata nascosta', expected: 'entro 200 ms dall\'uscita', actual: stopCmd ? `dopo ${msTxt(stopCmd.tSend - hid)}` : 'nessuno Stop inviato', verdict: stopCmd && stopCmd.tSend - hid <= 200 ? V.OK : V.DIFF, ref: 'A05' });
+      const as = ctx.ctl.lastAutoStop && ctx.ctl.lastAutoStop.t >= hid ? await ctx.ctl.lastAutoStop.done : null;
+      const tResp = as && as.ok ? as.r.tResp : null;
+      ctx.check({ name: 'risposta allo Stop mentre la pagina era nascosta', expected: '80 08 01 prima del ritorno su Chrome', actual: tResp ? `${hex(as.r.bytes)} dopo ${msTxt(tResp - hid)}, ${tResp < vis ? 'prima del ritorno' : 'solo al ritorno'}` : 'nessuna risposta', verdict: tResp && tResp < vis ? V.OK : V.DIFF, ref: 'A05, A71' });
+      const inside = ctx.r.data.filter((p) => p.t > hid + 500 && p.t < vis - 500);
+      const expectedPk = Math.max(0, Math.floor((vis - hid - 1000) / 1000));
+      ctx.check({ name: 'codice attivo in background (pacchetti Treadmill Data ricevuti)', expected: `circa uno al secondo (${expectedPk})`, actual: `${inside.length} pacchetti in ${msTxt(vis - hid)}`, verdict: expectedPk === 0 ? V.NC : inside.length >= expectedPk - 1 ? V.OK : V.DIFF, ref: 'A71' });
+      const dz = ctx.r.data.find((p) => p.t >= hid && p.speedCenti === 0);
+      ctx.check({ name: '0,0 km/h nei dati dopo l\'uscita', expected: 'entro circa 2 s', actual: dz ? `dopo ${msTxt(dz.t - hid)}` : 'mai', verdict: dz && dz.t - hid <= 2500 ? V.OK : V.DIFF, ref: 'A05' });
+      await observe(ctx, { id: 'T10-belt', title: 'Cosa ha fatto il nastro quando sei uscito da Chrome?', choices: [{ id: 'now', label: 'Si è fermato subito' }, { id: 'later', label: 'Si è fermato solo quando sono tornato' }, { id: 'no', label: 'Non si è fermato' }, { id: 'unknown', label: 'Non so' }] }, 'now', 'si è fermato subito', 'A05');
+    },
+  },
+  {
+    id: 'T11', title: 'Perdita del collegamento', motion: true, maxCenti: 200,
+    desc: 'A 2,0 km/h spegni il Bluetooth del telefono per circa 10 s. Compare l\'allarme rosso: è previsto. Il nastro continua finché il tool non si ricollega e invia Stop (A19). Non fermarlo se non serve; se dopo 30 s gira ancora, usa la console o la chiave.',
+    async run(ctx) {
+      const s = await startBelt(ctx); checkStart(ctx, s);
+      await ctx.sleep(1000);
+      await setSpeedObserved(ctx, 200);
+      await ctx.sleep(2000);
+      ctx.section('Bluetooth spento');
+      ctx.expectEvent('linkLoss');
+      const tAsk = ctx.now();
+      let gaveUp = false;
+      const askP = ctx.ask({ id: 'T11-bt-off', title: 'Spegni il Bluetooth del telefono adesso', text: 'Dalle impostazioni rapide spegni il Bluetooth. Comparirà l\'allarme rosso: è previsto. Riaccendilo dopo circa 10 s.', choices: [{ id: 'fail', label: 'Non riesco, annulla' }], timeoutMs: 45000 });
+      askP.then((r) => { if (r && (r.choice === 'fail' || r.timedOut)) gaveUp = true; }, () => {});
+      const lost = await ctx.waitUntil(() => gaveUp || (ctx.ctl.lastLinkLoss && ctx.ctl.lastLinkLoss.t >= tAsk), 46000);
+      ctx.ui.clearPrompt();
+      if (!lost || gaveUp || !ctx.ctl.lastLinkLoss || ctx.ctl.lastLinkLoss.t < tAsk) { ctx.check({ name: 'perdita del collegamento', expected: 'rilevata dopo lo spegnimento del Bluetooth', actual: 'non avvenuta', verdict: V.NC, ref: 'A19' }); return; }
+      const tLost = ctx.ctl.lastLinkLoss.t;
+      const lastPkt = [...ctx.r.data].reverse().find((p) => p.t <= tLost);
+      ctx.check({ name: 'perdita del collegamento rilevata', expected: 'allarme e ricollegamento automatico avviati', actual: `rilevata; ultimo pacchetto dati ${lastPkt ? msTxt(tLost - lastPkt.t) + ' prima' : '—'} a ${lastPkt ? kmh(lastPkt.speedCenti) : '—'}`, verdict: V.OK, ref: 'A19' });
+      ctx.instruct('Ricollegamento in corso…');
+      await ctx.waitUntil(() => !ctx.ctl.reconnecting && ctx.ctl.link !== 'lost', 150000, 500);
+      const rec = ctx.ctl.lastRecovery || {};
+      ctx.check({ name: 'ricollegamento automatico', expected: 'riuscito senza scegliere di nuovo il dispositivo (A03)', actual: rec.tReconnected ? `dopo ${msTxt(rec.tReconnected - tLost)} (tentativo ${rec.attempts})` : `non riuscito (${rec.error || 'tentativi esauriti'})`, verdict: rec.tReconnected ? V.OK : V.DIFF, ref: 'A03, A19, A54' });
+      if (rec.tReconnected) {
+        ctx.timing('ricollegamento dopo la perdita', rec.tReconnected - tLost);
+        ctx.check({ name: 'Stop dopo il ricollegamento', expected: 'Stop immediato e poi 80 08 01', actual: rec.ok ? `Stop immediato a +${msTxt(rec.tQuickStop - rec.tReconnected)}; risposta ${hex(rec.bytes)} a +${msTxt(rec.tStop - rec.tReconnected)} dal ricollegamento` : 'Stop non confermato', verdict: rec.ok ? V.OK : V.DIFF, ref: 'A19' });
+        ctx.check({ name: 'notifiche e indicazioni riattivate', expected: 'tutte attive', actual: ctx.ctl.allSubscribed() ? 'tutte attive' : Object.entries(ctx.ctl.subs).filter(([, v]) => !v).map(([k]) => k).join(', ') + ' non attive', verdict: ctx.ctl.allSubscribed() ? V.OK : V.DIFF, ref: 'Handoff, A19' });
+        if (rec.ok) {
+          ctx.timing('tempo senza controllo (perdita → Stop confermato)', rec.tStop - tLost);
+          const dz = await ctx.waitData((p) => p.speedCenti === 0, { since: rec.tReconnected, timeout: 4000 });
+          ctx.check({ name: '0,0 km/h nei dati dopo lo Stop', expected: 'valore raggiunto', actual: dz ? `dopo ${msTxt(dz.t - rec.tStop)} dalla risposta` : 'non raggiunto entro 4 s', verdict: dz ? V.OK : V.DIFF, ref: 'Addendum §5' });
+        }
+      }
+      ctx.instruct('Conferma sull\'allarme rosso che il nastro è fermo.');
+      await ctx.waitUntil(() => !ctx.ctl.manualStopRequired, 300000, 500);
+      await observe(ctx, { id: 'T11-belt', title: 'Come si è fermato il nastro?', choices: [{ id: 'tool', label: 'Da solo, dopo che ho riacceso il Bluetooth' }, { id: 'me', label: 'L\'ho fermato io (console o chiave)' }, { id: 'unknown', label: 'Non so' }] }, 'tool', 'da solo, dopo il ricollegamento', 'A19');
+      await observe(ctx, { id: 'T11-alarm', title: 'Hai sentito l\'allarme sonoro?', choices: YES_NO }, 'yes', 'sì', 'A19');
+    },
+  },
 ];
 
 /* =========================================================================
@@ -1450,7 +1541,7 @@ class Runner {
     const attempt = this.runs.filter((r) => r.id === id).length + 1;
     const run = { id, title: def.title, attempt, status: 'in corso', checks: [], timings: {}, tStart: this.env.now(), tEnd: null, abortReason: null, aborted: false, closing: false, abortables: new Set() };
     this.runs.push(run); this.cur = run; this.status[id] = 'in corso';
-    this.ctl.activeTestId = id; this.ctl.policy = defaultPolicy(); this.log.testId = id;
+    this.ctl.activeTestId = id; this.ctl.policy = defaultPolicy(); this.ctl.expect = {}; this.log.testId = id;
     this.log.add('SISTEMA', { text: `inizio ${id} ${def.title} (tentativo ${attempt}, velocità massima ${kmh(def.maxCenti)})` });
     this.ui.update();
     let outcome = 'completato';
@@ -1464,7 +1555,7 @@ class Runner {
         this.ctl.emergencyStop(`errore inatteso nel test: ${e.message}`, { abortTest: false });
       }
     } finally {
-      this.ctl.policy = defaultPolicy();
+      this.ctl.policy = defaultPolicy(); this.ctl.expect = {};
       run.closing = true;
       if (def.motion) await this._closeMotionTest();
       this.ctl.activeTestId = null;
@@ -1803,7 +1894,12 @@ $('btnConnect').addEventListener('click', async () => {
   try {
     if (!transport.device) { log.add('UTENTE', { text: 'scelta del dispositivo' }); await transport.choose(); }
     await ctl.connect();
-  } catch (e) { log.add('ERRORE', { text: `collegamento: ${e.name}: ${e.message}` }); }
+  } catch (e) {
+    log.add('ERRORE', { text: `collegamento: ${e.name}: ${e.message}` });
+    // Dopo un Bluetooth spento e riacceso il dispositivo memorizzato può non
+    // essere più valido: al tocco successivo si sceglie di nuovo.
+    if (e.name !== 'NotFoundError') { transport.device = null; log.add('SISTEMA', { text: 'al prossimo tocco su «Collega» sceglierai di nuovo il dispositivo' }); }
+  }
   render();
 });
 $('btnDisconnect').addEventListener('click', () => { try { ctl.disconnect(); } catch (e) { log.add('ERRORE', { text: e.message }); } render(); });
@@ -1842,7 +1938,9 @@ $('btnSaveCsv').addEventListener('click', () => download(`run100e-registro-${sta
 $('chkShowData').addEventListener('change', () => { logLines.length = 0; for (const e of log.entries) if (e.kind !== 'DATI' || $('chkShowData').checked) logLines.push(log.line(e)); $('log').textContent = logLines.slice(-200).join('\n'); });
 
 // A05: pagina nascosta → Stop; al ritorno si richiede di nuovo il Wake Lock.
-document.addEventListener('visibilitychange', () => { if (document.hidden) ctl.onPageHidden(); else requestWakeLock(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) ctl.onPageHidden(); else { ctl.onPageVisible(); requestWakeLock(); } });
+document.addEventListener('freeze', () => ctl.onPageFreeze(true));
+document.addEventListener('resume', () => ctl.onPageFreeze(false));
 window.addEventListener('pagehide', () => ctl.onPageUnload());
 
 /* ---------------- avvio ---------------- */
