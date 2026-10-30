@@ -1,6 +1,6 @@
 # Registro delle assunzioni – Banco prova Run100E
 
-Versione 6 · 30 ottobre 2026 · vale per il tool v1.2.0 (`run100e-banco-prova.html`)
+Versione 7 · 30 ottobre 2026 · vale per il tool v1.3.0 (`run100e-banco-prova.html`)
 
 Fonti di verità:
 - «Handoff tecnico» del 25/10/2026 (H);
@@ -8,7 +8,8 @@ Fonti di verità:
 - registro della mini pagina del 27/10/2026 alle 16:36, inviato da Stefano (M);
 - registro e report del banco prova v1.0.0 del 27/10/2026, 18:05–18:14 (R);
 - registro del banco prova v1.1.0 del 30/10/2026, 09:37–09:41, T5 e T9 (R2);
-- registro del banco prova v1.1.0 del 30/10/2026, 09:45, T6 (R3).
+- registro del banco prova v1.1.0 del 30/10/2026, 09:45, T6 (R3);
+- registro del banco prova v1.2.0 del 30/10/2026, 10:18–10:21, T10 e T11, con le spiegazioni di Stefano su T11 (R4).
 
 Ogni voce ha uno di tre stati:
 - **Confermata**: decisa o confermata da Stefano, oppure verificata su un registro reale.
@@ -25,9 +26,9 @@ Il codice e il report citano gli identificativi Axx.
 |---|---|---|---|
 | A01 | La pagina si pubblica su GitHub Pages (https) e si apre in Chrome per Android. | Confermata | Stefano ha un account GitHub. M: secure context = sì. |
 | A02 | Il file locale e l'artifact di claude.ai non sono usabili per Web Bluetooth. | Ipotesi | Non provato. GitHub Pages invece funziona (M). |
-| A03 | Dopo una caduta, Chrome si ricollega allo stesso dispositivo senza un nuovo `requestDevice`. | **Confermata** | M: ricollegato in 15 ms. Una disconnessione volontaria non equivale a una perdita di segnale: il caso del segnale perso resta non provato. |
+| A03 | Dopo una caduta, Chrome si ricollega allo stesso dispositivo senza un nuovo `requestDevice`. | Confermata per una disconnessione volontaria (M); **non verificata** dopo Bluetooth spento e riacceso | R4: dopo la riaccensione Chrome non si è ricollegato da solo; le scritture fallivano ancora circa 30 s dopo. Va riprovato con la v1.3 (che chiude il collegamento appeso prima di riprovare). |
 | A04 | Il numero di serie (0x2A25) non si legge. | **Confermata, con correzione** | M: la caratteristica non esiste. Mancano anche 0x2A27 (revisione hardware) e la blocklist non c'entra. Il tool non le legge. |
-| A05 | Se la pagina va in background (schermo spento, cambio di app) il tool invia subito Stop. Senza Wake Lock attivo i test non partono. | Decisa da Claude | Chrome può sospendere una pagina in background e il nastro continua da solo (H). Lo Stop parte solo se il codice gira ancora in quel momento: vedi i rischi residui. |
+| A05 | Se la pagina va in background il tool invia subito Stop. Senza Wake Lock attivo i test non partono. | **Confermata** | R4, T10: Stop 2 ms dopo l'uscita da Chrome, risposta `80 08 01` dopo 97 ms, prima del ritorno; dati ricevuti anche in background; il nastro si è fermato subito. Assenza di circa 2,5 s: un background più lungo non è stato provato, ma lo Stop parte all'uscita. |
 | A06 | Gli attesi di Device Information sono i valori letti da M: produttore «EW. Inc», modello «Domyos FTMS», firmware «V1.5 21090702», software «1.0.0», System ID `7A C2 0E 00 00 19 9E 68`. | Confermata (dato reale) | M. |
 | A07 | Il tapis roulant può annunciarsi con «DOMYOS» o con «Domyos». Il filtro accetta entrambi. | **Confermata** | H: «DOMYOS-TC-7417». M: «Domyos-TC-7417». |
 
@@ -79,6 +80,10 @@ Il codice e il report citano gli identificativi Axx.
 | A71 | T10 giudica se il codice gira in background da tre segnali: Stop inviato entro 200 ms dall'uscita; risposta allo Stop arrivata prima del ritorno su Chrome; pacchetti Treadmill Data ricevuti durante il background (circa uno al secondo). Se Chrome congela la pagina, l'uscita viene registrata solo al ritorno: in quel caso lo rivelano la tua osservazione e i pacchetti mancanti. | Decisa da Claude | Il tool registra anche gli eventi `freeze` e `resume` di Chrome, se arrivano. |
 | A72 | Ordine dei nuovi test: T10 (background, il nastro resta senza controllo per pochi secondi) prima di T11 (perdita del collegamento, il nastro gira per tutto il tempo in cui il Bluetooth resta spento). Entrambi a 2,0 km/h. T9 resta facoltativo ma non è più l'ultimo. | Decisa da Claude | Regola 6: dal più sicuro al più impegnativo. Nella proposta del 30/10 l'ordine era invertito. |
 | A73 | Se un ricollegamento manuale fallisce (per esempio dopo aver spento e riacceso il Bluetooth), al tocco successivo su «Collega» si sceglie di nuovo il dispositivo. | Decisa da Claude | Dopo un riavvio del Bluetooth il dispositivo memorizzato da Chrome potrebbe non essere più valido (ipotesi). |
+| A74 | Sorveglianza del collegamento: se per più di 3 s non arriva alcuna notifica (dati, Training Status, eventi, indicazioni), il tool considera il collegamento perso: allarme, test interrotto (salvo T11), tentativo di Stop, ricollegamento. Rilevazione attesa tra 3,0 e 3,25 s dall'ultimo pacchetto. Un pacchetto perso (buco di 2 s) è tollerato. | Decisa da Claude, su dati R4 | R4: spegnendo il Bluetooth del telefono **Chrome non ha segnalato la disconnessione** per 42 s; il tool v1.2 non se n'è accorto. Le notifiche arrivano ogni secondo in tutte le sessioni (A62, A63). Lo stesso controllo serve nell'app. |
+| A75 | Una scrittura che fallisce («GATT operation failed», NetworkError) = collegamento perso. Il ricollegamento chiude prima ogni collegamento rimasto «appeso» in Chrome e non si arrende al primo Stop fallito: chiude e riprova, fino a 30 tentativi. | Decisa da Claude, su dati R4 | R4: alle 10:20:43 Chrome risultava ancora collegato ma ogni scrittura falliva. |
+| A76 | Sull'allarme compare il pulsante «Ricollega scegliendo il dispositivo». Serve se Chrome non riesce a riusare il dispositivo memorizzato dopo un riavvio del Bluetooth. La scelta richiede un tuo tocco. Solo il dispositivo scelto per ultimo può segnalare disconnessioni. | Decisa da Claude | Ipotesi: dopo il riavvio del Bluetooth il dispositivo memorizzato potrebbe non essere più valido. In T11 conviene aspettare 20 s prima di toccarlo, per sapere se il ricollegamento automatico funziona. |
+| A77 | Quando il collegamento cade, il tapis roulant continua alla stessa velocità e la console passa alla schermata di una sessione avviata senza Bluetooth. Si ferma solo con la console o con la chiave. | **Osservata** | R4 (Stefano), coerente con H. Dopo il ricollegamento lo Stop potrebbe richiedere un nuovo Request Control: il tool lo gestisce (A19), non ancora osservato. |
 | A55 | La finestra di correlazione parte dall'invio del comando. | Decisa da Claude | — |
 
 ## Test
@@ -104,6 +109,7 @@ Il codice e il report citano gli identificativi Axx.
 ## Storico delle modifiche
 
 - v1, 27/10/2026 12:35: prima stesura, dopo le risposte alle cinque domande.
+- v7, 30/10/2026: tool v1.3.0. T10 riuscito (A05 confermata). T11 ha mostrato che Chrome non segnala la perdita del collegamento con il Bluetooth spento: nuove A74–A77, A03 da riverificare.
 - v6, 30/10/2026: tool v1.2.0 con T10 e T11. A44 aggiornata con l'osservazione di Stefano; nuove A69–A73. L'intestazione del registro ora riporta «assunzioni v6».
 - v5, 30/10/2026: T6 completato (R3). A32 confermata, A68 aggiornata. Il tool v1.1.0 riporta ancora «assunzioni v3» nell'intestazione: l'etichetta verrà allineata alla prossima versione del tool.
 - v4, 30/10/2026: dati di T5 e T9 (R2). A33 osservata, A46 confermata, A44 da rivedere; nuove A67–A68. T6 non ancora eseguito con la v1.1.

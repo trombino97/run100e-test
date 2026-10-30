@@ -244,6 +244,7 @@ details summary { cursor: pointer; font-weight: 700; min-height: 40px; display: 
   <h2 id="ovTitle">COLLEGAMENTO PERSO</h2>
   <p id="ovText"></p>
   <p id="ovProgress" style="font-size:1rem;opacity:.9"></p>
+  <button class="btn" id="ovRechoose" type="button" hidden>Ricollega scegliendo il dispositivo</button>
   <button class="btn" id="ovAck" type="button">Il nastro è fermo</button>
 </div>
 
@@ -258,8 +259,8 @@ details summary { cursor: pointer; font-weight: 700; min-height: 40px; display: 
 (function (root) {
 'use strict';
 
-const TOOL_VERSION = '1.2.0';
-const ASSUMPTIONS_VERSION = 'v6 del 30/10/2026';
+const TOOL_VERSION = '1.3.0';
+const ASSUMPTIONS_VERSION = 'v7 del 30/10/2026';
 
 /* -------------------------------------------------------------------------
  * COSTANTI DI SICUREZZA. Ogni valore qui è una regola, non una preferenza.
@@ -289,6 +290,11 @@ const SAFETY = Object.freeze({
   STOP_BUSY_RETRY_MS: 1500,         // A39: Stop ripetuto se il GATT è occupato
   RECONNECT_ATTEMPTS: 30,           // A54
   RECONNECT_INTERVAL_MS: 1000,
+  // A74: il Run100E notifica Treadmill Data e Training Status ogni secondo,
+  // anche a nastro fermo. 3 s senza notifiche = collegamento perso, anche se
+  // Chrome non lo segnala (30/10: Bluetooth spento, nessun segnale per 42 s).
+  LINK_SILENCE_MS: 3000,
+  WATCHDOG_STEP_MS: 250,
   OVERSPEED_DATA_REPEAT_MS: 3000,
 });
 
@@ -516,6 +522,8 @@ class SafetyController {
     this.link = 'connected';
     this.log.add('SISTEMA', { text: `collegato a ${this.t.name}` });
     await this._subscribeAll();
+    this.lastRxT = this.env.now();
+    this._startWatchdog();
     this._emitState();
   }
   disconnect() {
@@ -621,6 +629,9 @@ class SafetyController {
       catch (e) {
         if (this.pending === pend) { this.pending = null; this.env.clearTimeout(pend.timer); }
         this.log.add('ERRORE', { text: `#${cmd.id} ${label}: scrittura non riuscita (${e.name}: ${e.message})` });
+        // A75: una scrittura che fallisce indica un collegamento non più valido
+        // (30/10: «GATT operation failed» senza alcun segnale di disconnessione).
+        this._linkLost(`scrittura non riuscita (${e.name}) (A75)`);
         throw new WriteFailed(`${label}: scrittura non riuscita (${e.message})`);
       }
       const r = await p;
@@ -679,6 +690,7 @@ class SafetyController {
     let r;
     try { r = await this._send(Ftms.stop(), { expected }); }
     catch (e) {
+      if (e instanceof WriteFailed && this.link !== 'connected') throw e; // A75: se ne occupa il ricollegamento
       if (e instanceof ResponseTimeout || e instanceof WriteFailed) {
         // A17: Stop senza risposta → secondo invio, poi Stop manuale.
         this.log.add('SICUREZZA', { text: 'Stop senza conferma: secondo invio (A17)' });
@@ -687,6 +699,7 @@ class SafetyController {
       } else if (e instanceof CommandRejected && e.result === 5) {
         // A19: controllo non consentito → Request Control e nuovo Stop.
         this.log.add('SICUREZZA', { text: 'Stop rifiutato (controllo non consentito): Request Control e nuovo Stop (A19)' });
+        if (this.reconnecting && this.lastRecovery) this.lastRecovery.neededControl = true;
         try { await this._send(Ftms.requestControl()); r = await this._send(Ftms.stop(), { expected }); }
         catch (e2) { this._requireManualStop(`Stop non riuscito (${e2.message})`); throw e2; }
       } else {
@@ -763,6 +776,7 @@ class SafetyController {
 
   /* ---------------- dati in arrivo ---------------- */
   _onIndication(b) {
+    this.lastRxT = this.env.now();
     const t = this.env.now();
     const r = Ftms.decodeResponse(b);
     if (!r) { this.log.add('ANOMALIA', { ch: '2AD9', bytes: b, text: 'indicazione non riconosciuta' }); this.emergencyStop('indicazione non riconosciuta sul Control Point (regola 4)'); return; }
@@ -779,6 +793,7 @@ class SafetyController {
     this.emergencyStop('risposta inattesa sul Control Point (regola 4)');
   }
   _onStatus(b) {
+    this.lastRxT = this.env.now();
     const t = this.env.now();
     const evt = Ftms.decodeStatus(b); evt.t = t;
     const cls = this.corr.classify(evt);
@@ -804,11 +819,13 @@ class SafetyController {
     if (cls.origin === 'external' && evt.key === '04') this._startPhase();
   }
   _onTraining(b) {
+    this.lastRxT = this.env.now();
     const s = Ftms.decodeTraining(b); this.lastTraining = { ...s, t: this.env.now(), bytes: b };
     this.log.add('STATO', { ch: '2AD3', bytes: b, text: `Training Status: ${s.name}` });
     this._emit('training', this.lastTraining); this._emitState();
   }
   _onData(b) {
+    this.lastRxT = this.env.now();
     const t = this.env.now();
     const d = Ftms.decodeTreadmill(b); d.t = t; this.lastData = d;
     this.log.add('DATI', { ch: '2ACD', bytes: b, text: dataText(d) });
@@ -825,21 +842,57 @@ class SafetyController {
 
   /* ---------------- perdita del collegamento (regola 4, A19) ---------------- */
   _onDisconnect() {
+    if (this.userDisconnect) {
+      this.userDisconnect = false; for (const k in this.subs) this.subs[k] = false; this._endPhase();
+      this.link = 'disconnected'; this.log.add('SISTEMA', { text: 'scollegato su tua richiesta' }); this._emitState(); return;
+    }
+    if (this.reconnecting) {
+      for (const k in this.subs) this.subs[k] = false;
+      if (this.pending) { const p = this.pending; this.pending = null; this.env.clearTimeout(p.timer); p.reject(new NotConnected('collegamento perso')); }
+      this.link = 'reconnecting'; this.log.add('SISTEMA', { text: 'Chrome segnala la disconnessione (durante il ricollegamento)' }); this._emitState(); return;
+    }
+    if (this.link !== 'connected') { this.log.add('SISTEMA', { text: 'Chrome segnala la disconnessione (già gestita)' }); return; }
+    this._linkLost('Chrome ha segnalato la disconnessione');
+  }
+  // A74: sorveglianza del collegamento basata sull'arrivo delle notifiche.
+  _startWatchdog() {
+    if (this.watchdogOn) return;
+    this.watchdogOn = true;
+    const tick = () => { this._checkSilence(); this.env.setTimeout(tick, SAFETY.WATCHDOG_STEP_MS); };
+    this.env.setTimeout(tick, SAFETY.WATCHDOG_STEP_MS);
+  }
+  _checkSilence() {
+    if (this.link !== 'connected' || this.reconnecting || !this.subs.data || this.lastRxT == null) return;
+    const gap = this.env.now() - this.lastRxT;
+    if (gap > SAFETY.LINK_SILENCE_MS) this._linkLost(`nessuna notifica da ${Math.round(gap)} ms (A74)`);
+  }
+  // Unico punto di ingresso per la perdita del collegamento, qualunque sia il
+  // segnale: evento di Chrome, silenzio delle notifiche, scrittura fallita.
+  _linkLost(reason) {
+    if (this.link !== 'connected' || this.reconnecting) return;
     for (const k in this.subs) this.subs[k] = false;
     if (this.pending) { const p = this.pending; this.pending = null; this.env.clearTimeout(p.timer); p.reject(new NotConnected('collegamento perso')); }
     this._endPhase();
-    if (this.userDisconnect) { this.userDisconnect = false; this.link = 'disconnected'; this.log.add('SISTEMA', { text: 'scollegato su tua richiesta' }); this._emitState(); return; }
-    if (this.reconnecting) { this.link = 'reconnecting'; this.log.add('SICUREZZA', { text: 'collegamento perso di nuovo durante il ricollegamento' }); this._emitState(); return; }
     this.link = 'lost'; this.manualStopRequired = true;
-    this.lastLinkLoss = { t: this.env.now() };
-    this.lastRecovery = { tLost: this.lastLinkLoss.t, ok: false, attempts: 0, tReconnected: null, tQuickStop: null, tStop: null, bytes: null, error: null };
+    this.lastLinkLoss = { t: this.env.now(), reason };
+    this.lastRecovery = { tLost: this.lastLinkLoss.t, reason, ok: false, attempts: 0, tReconnected: null, tQuickStop: null, tStop: null, bytes: null, error: null, rechosen: false, neededControl: false };
     let msg = 'Il nastro continua alla velocità dell\'ultimo comando. Fermalo adesso con lo Stop della console o togliendo la chiave.';
-    this.log.add('SICUREZZA', { text: 'COLLEGAMENTO PERSO. ' + msg });
+    this.log.add('SICUREZZA', { text: `COLLEGAMENTO PERSO (${reason}). ${msg}` });
     if (this.expect.linkLoss) {
-      msg = 'Prova T11 in corso: il nastro continua a 2,0 km/h. Riaccendi il Bluetooth dopo circa 10 s: il tool deve ricollegarsi e fermare il nastro. Se dopo 30 s gira ancora, o se qualcosa non va, fermalo con la console o la chiave.';
-    } else if (this.onAbortTest) this.onAbortTest('collegamento perso');
+      msg = 'Prova T11 in corso: il nastro continua a 2,0 km/h. Riaccendi il Bluetooth dopo circa 10 s. Il tool prova a ricollegarsi da solo: se dopo altri 20 s non ci riesce, tocca «Ricollega scegliendo il dispositivo». Se qualcosa non va, ferma il nastro con la console o la chiave.';
+    } else if (this.onAbortTest) this.onAbortTest(`collegamento perso: ${reason}`);
     this.ui.alert('lost', msg);
     this._emitState();
+    // Ultimo tentativo sul collegamento vecchio: se il problema riguarda solo
+    // le notifiche, lo Stop può ancora arrivare. L'esito non si può verificare.
+    try { this._noteCmd(Ftms.stop(), ' (tentativo sul collegamento perso; esito non verificabile)'); this.t.write('cp', Ftms.stop()).catch((e) => this.log.add('ERRORE', { text: `Stop sul collegamento perso non riuscito: ${e.name}` })); } catch (_) { /* ignora */ }
+    this._reconnectLoop();
+  }
+  // Pulsante «Ricollega scegliendo il dispositivo» (A76).
+  noteRechoose() { if (this.lastRecovery) this.lastRecovery.rechosen = true; this.log.add('UTENTE', { text: 'dispositivo scelto di nuovo per il ricollegamento (A76)' }); }
+  restartReconnect() {
+    if (this.reconnecting) { this.log.add('SISTEMA', { text: 'il nuovo dispositivo sarà usato al prossimo tentativo' }); return; }
+    if (this.link === 'connected') return;
     this._reconnectLoop();
   }
   async _reconnectLoop() {
@@ -849,6 +902,8 @@ class SafetyController {
         this.ui.alert('progress', `Ricollegamento: tentativo ${i} di ${SAFETY.RECONNECT_ATTEMPTS}`);
         this.log.add('SISTEMA', { text: `ricollegamento: tentativo ${i} di ${SAFETY.RECONNECT_ATTEMPTS}` });
         const rec = this.lastRecovery; if (rec) rec.attempts = i;
+        // A75: chiude un eventuale collegamento rimasto «appeso» in Chrome.
+        try { this.t.disconnect(); } catch (_) { /* nessun collegamento da chiudere */ }
         try { await this.t.connect(); }
         catch (e) { this.log.add('ERRORE', { text: `tentativo ${i} non riuscito: ${e.message}` }); await this._delay(SAFETY.RECONNECT_INTERVAL_MS); continue; }
         this.link = 'connected'; this.log.add('SISTEMA', { text: 'ricollegato' });
@@ -859,6 +914,7 @@ class SafetyController {
         catch (e) { this.log.add('ERRORE', { text: `Stop immediato non riuscito: ${e.message}` }); }
         // 2) Le sottoscrizioni si sono azzerate: si riattivano tutte.
         await this._subscribeAll();
+        this.lastRxT = this.env.now();
         // 3) Stop con risposta verificata.
         try {
           const r = await this.stop('ricollegamento (A19)');
@@ -866,8 +922,10 @@ class SafetyController {
           this.ui.alert('recovered', `Ricollegato. Stop confermato dal tapis roulant (${hex(r.bytes)}). Guarda il nastro e conferma che è fermo.`);
           return;
         } catch (e) {
-          if (!this.t.connected) { await this._delay(SAFETY.RECONNECT_INTERVAL_MS); continue; }
-          return; // _requireManualStop già chiamato da stop()
+          // A75: non ci si arrende al primo Stop fallito: si chiude e si riprova.
+          this.log.add('ERRORE', { text: `Stop dopo il ricollegamento non confermato (${e.message}): nuovo tentativo` });
+          this.link = 'reconnecting';
+          await this._delay(SAFETY.RECONNECT_INTERVAL_MS); continue;
         }
       }
       this.link = 'disconnected';
@@ -1444,7 +1502,7 @@ const TESTS = [
   },
   {
     id: 'T11', title: 'Perdita del collegamento', motion: true, maxCenti: 200,
-    desc: 'A 2,0 km/h spegni il Bluetooth del telefono per circa 10 s. Compare l\'allarme rosso: è previsto. Il nastro continua finché il tool non si ricollega e invia Stop (A19). Non fermarlo se non serve; se dopo 30 s gira ancora, usa la console o la chiave.',
+    desc: 'A 2,0 km/h spegni il Bluetooth del telefono per circa 10 s. Entro circa 3 s compare l\'allarme rosso: è previsto. Il nastro continua finché il tool non si ricollega e invia Stop (A19, A74). Non fermarlo se non serve; se qualcosa non va, usa la console o la chiave.',
     async run(ctx) {
       const s = await startBelt(ctx); checkStart(ctx, s);
       await ctx.sleep(1000);
@@ -1454,32 +1512,34 @@ const TESTS = [
       ctx.expectEvent('linkLoss');
       const tAsk = ctx.now();
       let gaveUp = false;
-      const askP = ctx.ask({ id: 'T11-bt-off', title: 'Spegni il Bluetooth del telefono adesso', text: 'Dalle impostazioni rapide spegni il Bluetooth. Comparirà l\'allarme rosso: è previsto. Riaccendilo dopo circa 10 s.', choices: [{ id: 'fail', label: 'Non riesco, annulla' }], timeoutMs: 45000 });
+      const askP = ctx.ask({ id: 'T11-bt-off', title: 'Spegni il Bluetooth del telefono adesso', text: 'Dalle impostazioni rapide spegni il Bluetooth. Entro circa 3 s compare l\'allarme rosso: è previsto. Riaccendi il Bluetooth dopo circa 10 s.', choices: [{ id: 'fail', label: 'Non riesco, annulla' }], timeoutMs: 45000 });
       askP.then((r) => { if (r && (r.choice === 'fail' || r.timedOut)) gaveUp = true; }, () => {});
-      const lost = await ctx.waitUntil(() => gaveUp || (ctx.ctl.lastLinkLoss && ctx.ctl.lastLinkLoss.t >= tAsk), 46000);
+      const isLost = () => ctx.ctl.lastLinkLoss && ctx.ctl.lastLinkLoss.t >= tAsk;
+      await ctx.waitUntil(() => gaveUp || isLost(), 46000);
       ctx.ui.clearPrompt();
-      if (!lost || gaveUp || !ctx.ctl.lastLinkLoss || ctx.ctl.lastLinkLoss.t < tAsk) { ctx.check({ name: 'perdita del collegamento', expected: 'rilevata dopo lo spegnimento del Bluetooth', actual: 'non avvenuta', verdict: V.NC, ref: 'A19' }); return; }
-      const tLost = ctx.ctl.lastLinkLoss.t;
+      if (!isLost()) { ctx.check({ name: 'perdita del collegamento', expected: 'rilevata dopo lo spegnimento del Bluetooth', actual: 'non avvenuta', verdict: V.NC, ref: 'A19, A74' }); return; }
+      const loss = ctx.ctl.lastLinkLoss; const tLost = loss.t;
       const lastPkt = [...ctx.r.data].reverse().find((p) => p.t <= tLost);
-      ctx.check({ name: 'perdita del collegamento rilevata', expected: 'allarme e ricollegamento automatico avviati', actual: `rilevata; ultimo pacchetto dati ${lastPkt ? msTxt(tLost - lastPkt.t) + ' prima' : '—'} a ${lastPkt ? kmh(lastPkt.speedCenti) : '—'}`, verdict: V.OK, ref: 'A19' });
+      const silent = lastPkt ? tLost - lastPkt.t : null;
+      ctx.check({ name: 'perdita del collegamento rilevata', expected: 'entro 4 s dall\'ultimo pacchetto dati (A74)', actual: `dopo ${msTxt(silent)} dall'ultimo pacchetto (${lastPkt ? kmh(lastPkt.speedCenti) : '—'}); segnale: ${loss.reason}`, verdict: silent != null && silent <= 4000 ? V.OK : V.DIFF, ref: 'A74' });
+      ctx.timing('rilevazione della perdita dopo l\'ultimo pacchetto', silent);
       ctx.instruct('Ricollegamento in corso…');
-      await ctx.waitUntil(() => !ctx.ctl.reconnecting && ctx.ctl.link !== 'lost', 150000, 500);
-      const rec = ctx.ctl.lastRecovery || {};
-      ctx.check({ name: 'ricollegamento automatico', expected: 'riuscito senza scegliere di nuovo il dispositivo (A03)', actual: rec.tReconnected ? `dopo ${msTxt(rec.tReconnected - tLost)} (tentativo ${rec.attempts})` : `non riuscito (${rec.error || 'tentativi esauriti'})`, verdict: rec.tReconnected ? V.OK : V.DIFF, ref: 'A03, A19, A54' });
-      if (rec.tReconnected) {
+      const rec = ctx.ctl.lastRecovery;
+      await ctx.waitUntil(() => rec.ok || (!ctx.ctl.reconnecting && ctx.ctl.link !== 'connected' && !ctx.ctl.manualStopRequired), 180000, 500);
+      ctx.check({ name: 'ricollegamento', expected: 'automatico, senza scegliere di nuovo il dispositivo (A03)', actual: rec.ok ? `riuscito dopo ${msTxt(rec.tReconnected - tLost)}, tentativo ${rec.attempts}${rec.rechosen ? ', dopo che hai scelto di nuovo il dispositivo' : ', automatico'}` : `non riuscito (${rec.error || 'interrotto'})`, verdict: rec.ok && !rec.rechosen ? V.OK : V.DIFF, ref: 'A03, A19, A54, A76' });
+      if (rec.ok) {
         ctx.timing('ricollegamento dopo la perdita', rec.tReconnected - tLost);
-        ctx.check({ name: 'Stop dopo il ricollegamento', expected: 'Stop immediato e poi 80 08 01', actual: rec.ok ? `Stop immediato a +${msTxt(rec.tQuickStop - rec.tReconnected)}; risposta ${hex(rec.bytes)} a +${msTxt(rec.tStop - rec.tReconnected)} dal ricollegamento` : 'Stop non confermato', verdict: rec.ok ? V.OK : V.DIFF, ref: 'A19' });
+        ctx.check({ name: 'Stop dopo il ricollegamento', expected: 'Stop immediato e poi 80 08 01', actual: `Stop immediato a +${msTxt(rec.tQuickStop - rec.tReconnected)}; risposta ${hex(rec.bytes)} a +${msTxt(rec.tStop - rec.tReconnected)} dal ricollegamento${rec.neededControl ? '; è servito un nuovo Request Control' : ''}`, verdict: V.OK, ref: 'A19' });
         ctx.check({ name: 'notifiche e indicazioni riattivate', expected: 'tutte attive', actual: ctx.ctl.allSubscribed() ? 'tutte attive' : Object.entries(ctx.ctl.subs).filter(([, v]) => !v).map(([k]) => k).join(', ') + ' non attive', verdict: ctx.ctl.allSubscribed() ? V.OK : V.DIFF, ref: 'Handoff, A19' });
-        if (rec.ok) {
-          ctx.timing('tempo senza controllo (perdita → Stop confermato)', rec.tStop - tLost);
-          const dz = await ctx.waitData((p) => p.speedCenti === 0, { since: rec.tReconnected, timeout: 4000 });
-          ctx.check({ name: '0,0 km/h nei dati dopo lo Stop', expected: 'valore raggiunto', actual: dz ? `dopo ${msTxt(dz.t - rec.tStop)} dalla risposta` : 'non raggiunto entro 4 s', verdict: dz ? V.OK : V.DIFF, ref: 'Addendum §5' });
-        }
+        ctx.timing('tempo senza controllo (perdita → Stop confermato)', rec.tStop - tLost);
+        const dz = await ctx.waitData((p) => p.speedCenti === 0, { since: rec.tReconnected, timeout: 4000 });
+        ctx.check({ name: '0,0 km/h nei dati dopo lo Stop', expected: 'valore raggiunto', actual: dz ? `dopo ${msTxt(dz.t - rec.tStop)} dalla risposta` : 'non raggiunto entro 4 s', verdict: dz ? V.OK : V.DIFF, ref: 'Addendum §5' });
       }
       ctx.instruct('Conferma sull\'allarme rosso che il nastro è fermo.');
       await ctx.waitUntil(() => !ctx.ctl.manualStopRequired, 300000, 500);
-      await observe(ctx, { id: 'T11-belt', title: 'Come si è fermato il nastro?', choices: [{ id: 'tool', label: 'Da solo, dopo che ho riacceso il Bluetooth' }, { id: 'me', label: 'L\'ho fermato io (console o chiave)' }, { id: 'unknown', label: 'Non so' }] }, 'tool', 'da solo, dopo il ricollegamento', 'A19');
-      await observe(ctx, { id: 'T11-alarm', title: 'Hai sentito l\'allarme sonoro?', choices: YES_NO }, 'yes', 'sì', 'A19');
+      await observe(ctx, { id: 'T11-belt', title: 'Come si è fermato il nastro?', choices: [{ id: 'tool', label: 'Da solo, dopo il ricollegamento' }, { id: 'me', label: 'L\'ho fermato io (console o chiave)' }, { id: 'unknown', label: 'Non so' }] }, 'tool', 'da solo, dopo il ricollegamento', 'A19');
+      await observe(ctx, { id: 'T11-alarm', title: 'L\'allarme è partito pochi secondi dopo lo spegnimento del Bluetooth?', choices: YES_NO }, 'yes', 'sì, entro circa 3 s', 'A74');
+      await observe(ctx, { id: 'T11-console', title: 'La console è passata alla schermata di una sessione senza Bluetooth?', choices: YES_NO }, 'yes', 'sì (osservato il 30/10; Handoff)', 'A77');
     },
   },
 ];
@@ -1677,14 +1737,15 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 
 /* ---------------- trasporto Web Bluetooth ---------------- */
 class WebBleTransport {
-  constructor() { this.device = null; this.server = null; this.chars = new Map(); this.handlers = new Map(); this.listened = new WeakSet(); this.onDisconnect = null; }
+  constructor() { this.device = null; this.server = null; this.chars = new Map(); this.handlers = new Map(); this.listened = new WeakSet(); this.listenedDevices = new WeakSet(); this.onDisconnect = null; }
   get connected() { return !!(this.device && this.device.gatt.connected); }
   get name() { return this.device ? this.device.name : ''; }
   // Deve partire direttamente dal tocco: nessun await prima di requestDevice.
   async choose() {
     const dev = await navigator.bluetooth.requestDevice({ filters: C.NAME_FILTERS, optionalServices: C.SERVICES });
-    if (dev !== this.device) { dev.addEventListener('gattserverdisconnected', () => { this.chars.clear(); if (this.onDisconnect) this.onDisconnect(); }); }
-    this.device = dev;
+    // Solo il dispositivo attuale può segnalare una disconnessione (A76).
+    if (!this.listenedDevices.has(dev)) { dev.addEventListener('gattserverdisconnected', () => { if (dev !== this.device) return; this.chars.clear(); if (this.onDisconnect) this.onDisconnect(); }); this.listenedDevices.add(dev); }
+    this.device = dev; this.chars.clear();
   }
   async connect() {
     if (!this.device) throw new Error('nessun dispositivo scelto');
@@ -1777,6 +1838,7 @@ const ui = {
   wakeLockActive() { return !!wakeLock && !wakeLock.released; },
   update() { render(); },
 };
+setInterval(() => { const b = $('ovRechoose'); if (b) b.hidden = !(ctl.link === 'reconnecting' || ctl.link === 'lost' || (ctl.link === 'disconnected' && ctl.manualStopRequired)); }, 500);
 
 const log = new C.Logger(env);
 const transport = new WebBleTransport();
@@ -1928,6 +1990,14 @@ $('prompt').addEventListener('click', (ev) => {
 // Regola 3: lo Stop funziona sempre, con o senza test in corso.
 $('btnStop').addEventListener('click', () => { audio.init(); log.add('UTENTE', { text: 'STOP premuto' }); ctl.userStop(); render(); });
 $('btnAbort').addEventListener('click', () => { log.add('UTENTE', { text: 'Interrompi test premuto' }); ctl.emergencyStop('test interrotto da te'); render(); });
+// A76: dopo un riavvio del Bluetooth Chrome può non riuscire a riusare il
+// dispositivo memorizzato. La scelta richiede un tuo tocco (gesto utente).
+$('ovRechoose').addEventListener('click', async () => {
+  audio.init();
+  try { await transport.choose(); ctl.noteRechoose(); ctl.restartReconnect(); }
+  catch (e) { log.add('ERRORE', { text: `scelta del dispositivo: ${e.name}: ${e.message}` }); }
+  render();
+});
 $('ovAck').addEventListener('click', () => { ctl.confirmStoppedByUser(); if (ctl.link === 'reconnecting') { $('overlay').hidden = false; $('ovTitle').textContent = 'RICOLLEGAMENTO IN CORSO'; audio.alarm(false); } render(); });
 $('btnReport').addEventListener('click', report);
 $('btnCopyReport').addEventListener('click', () => copy(report(), 'report'));
